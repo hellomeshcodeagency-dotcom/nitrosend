@@ -165,6 +165,16 @@ label.f{display:block;font:600 11px var(--mono);letter-spacing:.1em;text-transfo
 .senders-table b{color:var(--text)}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--panel-2);border:1px solid var(--nitro);color:var(--text);padding:10px 16px;border-radius:10px;font:13px var(--mono);opacity:0;transition:.25s;z-index:60;pointer-events:none;box-shadow:0 0 24px var(--nitro-glow)}
 .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+/* Fixed send button: never moves, for auto clickers */
+#fixedSend{position:fixed;right:24px;bottom:24px;z-index:80;width:220px;height:72px;border:0;border-radius:14px;cursor:pointer;
+  font:700 20px var(--display);letter-spacing:.1em;text-transform:uppercase;color:#04121A;
+  background:linear-gradient(90deg,var(--nitro),#3AA0FF);box-shadow:0 0 28px var(--nitro-glow);display:none;
+  align-items:center;justify-content:center;flex-direction:column;line-height:1.1;transition:filter .15s}
+#fixedSend.on{display:flex}
+#fixedSend small{font:600 10.5px var(--mono);letter-spacing:.06em;text-transform:none;opacity:.75;margin-top:3px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#fixedSend.wait{filter:grayscale(.6) brightness(.8);cursor:wait}
+#fixedSend.done{background:var(--panel-2);color:var(--dim);box-shadow:none;border:1px solid var(--line-2);cursor:default}
+#v-send{padding-bottom:110px}
 kbd{font:11px var(--mono);border:1px solid var(--line-2);border-bottom-width:2px;border-radius:4px;padding:1px 5px;color:var(--dim)}
 
 @media (max-width:980px){
@@ -259,10 +269,9 @@ kbd{font:11px var(--mono);border:1px solid var(--line-2);border-bottom-width:2px
   <!-- ================= SEND ================= -->
   <section class="view" id="v-send">
     <div class="sendbar">
-      <button class="btn go big" id="sendNext">⚡ Send next</button>
       <div class="meta" id="nextMeta">—</div>
       <span class="spacer"></span>
-      <div class="meta">Shortcut: <kbd>N</kbd> send next</div>
+      <div class="meta">Fixed SEND button: bottom-right · Shortcut: <kbd>N</kbd></div>
       <button class="btn sm" id="exportCsv">Export CSV</button>
     </div>
 
@@ -312,6 +321,9 @@ kbd{font:11px var(--mono);border:1px solid var(--line-2);border-bottom-width:2px
         <label class="f" for="sCap">Daily cap per account</label>
         <input id="sCap" type="number" min="1" max="2000" step="1">
         <div class="hint">NitroSend rotates through your accounts and skips any that hit the cap today. In Gmail mode it opens the right account automatically. In mailto mode it tells you which account to send from.</div>
+        <label class="f" for="sLock">Send button lock after each click (seconds)</label>
+        <input id="sLock" type="number" min="0" max="30" step="0.5">
+        <div class="hint">Stops a fast auto clicker from sending the same email twice. Set this a little shorter than your auto clicker's interval.</div>
         <div class="senders-table" id="senderStats"></div>
 
         <h3 class="ptitle" style="margin-top:24px">Engine</h3>
@@ -332,6 +344,7 @@ kbd{font:11px var(--mono);border:1px solid var(--line-2);border-bottom-width:2px
 <!-- Details modal -->
 <div class="modal" id="modal"><div class="mbox" id="mbox"></div></div>
 <div class="toast" id="toast"></div>
+<button id="fixedSend" type="button">⚡ Send<small id="fixedSendSub"></small></button>
 
 <script src="pitches.js"></script>
 <script>
@@ -374,6 +387,7 @@ const DEFAULTS = {
   mode: 'mailto',
   senders: [],
   cap: 50,
+  lock: 1.5,
   concurrency: 4,
   psiKey: '',
   disabledServices: [],
@@ -611,6 +625,7 @@ function refreshStats() {
   $('#nextMeta').innerHTML = nxt
     ? `Next: <b>${esc(nxt.a.storeName)}</b> → ${esc(nxt.email)}${sender ? ` · from <b>${esc(sender)}</b>` : ''}${capped ? ' · <span style="color:var(--hot)">all accounts capped</span>' : ''}`
     : 'Nothing ready to send yet';
+  updateFixedSend();
 }
 
 function filtered() {
@@ -762,6 +777,7 @@ $$('.tab').forEach((t) => t.addEventListener('click', () => switchView(t.dataset
 function switchView(v) {
   $$('.tab').forEach((x) => x.classList.toggle('on', x.dataset.v === v));
   $$('.view').forEach((x) => x.classList.toggle('on', x.id === 'v-' + v));
+  $('#fixedSend').classList.toggle('on', v === 'send');
   if (v === 'send') renderList();
   if (v === 'settings') fillSettings();
   window.scrollTo({ top: 0 });
@@ -813,7 +829,7 @@ $('#fChips').addEventListener('click', (e) => {
   const b = e.target.closest('.chip'); if (!b) return;
   view.filter = b.dataset.f; view.page = 0;
   $$('#fChips .chip').forEach((c) => c.classList.toggle('on', c === b));
-  renderList();
+  renderList(); updateFixedSend();
 });
 $('#fService').addEventListener('change', (e) => { view.service = e.target.value; view.page = 0; renderList(); });
 $('#fSearch').addEventListener('input', (e) => { view.q = e.target.value; view.page = 0; scheduleListRender(); });
@@ -867,15 +883,34 @@ $('#modal').addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') $('#modal').classList.remove('on');
   if ((e.key === 'n' || e.key === 'N') && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && $('#v-send').classList.contains('on')) {
-    e.preventDefault(); $('#sendNext').click();
+    e.preventDefault(); $('#fixedSend').click();
   }
 });
 
-$('#sendNext').addEventListener('click', () => {
-  const pool = view.filter === 'hot' ? readyLeads().filter((l) => priorityOf(l) === 'hot') : readyLeads();
-  const l = pool[0];
-  if (!l) return toast('Nothing left to send');
+/* Fixed SEND button — same spot every time, with a lock against double clicks */
+let sendLockedUntil = 0;
+function nextPool() {
+  return view.filter === 'hot' ? readyLeads().filter((l) => priorityOf(l) === 'hot') : readyLeads();
+}
+function updateFixedSend() {
+  const b = $('#fixedSend');
+  const sub = $('#fixedSendSub');
+  const locked = Date.now() < sendLockedUntil;
+  const next = nextPool()[0];
+  const { capped } = pickSender();
+  b.classList.toggle('wait', locked);
+  b.classList.toggle('done', !next || capped);
+  b.firstChild.nodeValue = !next ? 'Done ✓' : capped ? 'Cap reached' : locked ? 'Wait…' : '⚡ Send';
+  sub.textContent = !next ? 'Nothing left to send' : capped ? 'All accounts hit today’s cap' : `${next.a.storeName} → ${next.email}`;
+}
+$('#fixedSend').addEventListener('click', () => {
+  if (Date.now() < sendLockedUntil) return;
+  const l = nextPool()[0];
+  if (!l) { updateFixedSend(); return; }
+  sendLockedUntil = Date.now() + (settings.lock || 0) * 1000;
   sendLead(l);
+  updateFixedSend();
+  if (settings.lock) setTimeout(updateFixedSend, settings.lock * 1000 + 30);
 });
 
 $('#exportCsv').addEventListener('click', () => {
@@ -899,6 +934,7 @@ function fillSettings() {
   $('#sMode').value = settings.mode;
   $('#sSenders').value = (settings.senders || []).join('\n');
   $('#sCap').value = settings.cap;
+  $('#sLock').value = settings.lock;
   $('#sConc').value = String(settings.concurrency);
   $('#sPsi').value = settings.psiKey;
   const off = new Set(settings.disabledServices || []);
@@ -915,6 +951,8 @@ function readSettings() {
   settings.mode = $('#sMode').value;
   settings.senders = $('#sSenders').value.split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter((s) => EMAIL_RE.test(s));
   settings.cap = Math.max(1, parseInt($('#sCap').value, 10) || DEFAULTS.cap);
+  settings.lock = Math.max(0, parseFloat($('#sLock').value));
+  if (isNaN(settings.lock)) settings.lock = DEFAULTS.lock;
   settings.concurrency = parseInt($('#sConc').value, 10) || 4;
   settings.psiKey = $('#sPsi').value.trim();
   settings.disabledServices = $$('#sServices input').filter((i) => !i.checked).map((i) => i.value);
