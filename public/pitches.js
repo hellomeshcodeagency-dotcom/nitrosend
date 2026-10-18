@@ -1,31 +1,75 @@
 /* NitroSend — pitch engine
- * Every email = greeting → HOOK (a specific fact about their store) → Christmas reason → offer → yes/no question.
- * Written to stay out of spam: no "free", "sale(s)", "buy", "save", "offer", "deal", "guarantee",
- * no percentages, no money amounts, no exclamation marks, no ALL CAPS.
- * Edit the templates freely. Placeholders come from ctx (see buildCtx).
+ *
+ * Every email:
+ *   greeting → COMPLIMENT (real, from their store) → PROBLEM (what's costing them orders)
+ *   → FIX (how you solve it, + optional season line) → REVERSE-PSYCHOLOGY close → sign-off
+ *
+ * Spam-safe: no "free", "sale(s)", "buy", "save", "offer", "deal", "guarantee", no %, no money,
+ * no exclamation marks, no ALL CAPS. Greeting, compliment, close and subject rotate per store,
+ * so no two emails look the same.
  */
 (function (global) {
   'use strict';
 
+  /* ---------------- Seasons (optional) ---------------- */
+  function nthWeekday(year, month, weekday, n) {
+    const first = new Date(year, month, 1);
+    const offset = (weekday - first.getDay() + 7) % 7;
+    return new Date(year, month, 1 + offset + (n - 1) * 7);
+  }
+  function easter(y) {
+    const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4;
+    const f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31) - 1, day = ((h + l - 7 * m + 114) % 31) + 1;
+    return new Date(y, month, day);
+  }
+
+  const SEASONS = {
+    none: { label: 'None (no season)' },
+    christmas: { label: 'Christmas', name: 'Christmas', rush: 'the Christmas rush', gift: 'Christmas gift', date: (y) => new Date(y, 11, 25) },
+    bfcm: { label: 'Black Friday / Cyber Monday', name: 'Black Friday', rush: 'Black Friday', gift: 'Black Friday', date: (y) => { const t = nthWeekday(y, 10, 4, 4); return new Date(y, 10, t.getDate() + 1); } },
+    newyear: { label: 'New Year', name: 'New Year', rush: 'the New Year rush', gift: 'New Year', date: (y) => new Date(y + 1, 0, 1) },
+    valentines: { label: "Valentine's Day", name: "Valentine's Day", rush: "Valentine's Day", gift: "Valentine's gift", date: (y) => new Date(y, 1, 14) },
+    easter: { label: 'Easter', name: 'Easter', rush: 'Easter', gift: 'Easter gift', date: (y) => easter(y) },
+    mothers: { label: "Mother's Day", name: "Mother's Day", rush: "Mother's Day", gift: "Mother's Day gift", date: (y) => nthWeekday(y, 4, 0, 2) },
+    fathers: { label: "Father's Day", name: "Father's Day", rush: "Father's Day", gift: "Father's Day gift", date: (y) => nthWeekday(y, 5, 0, 3) },
+    backtoschool: { label: 'Back to School', name: 'back-to-school', rush: 'back-to-school season', gift: 'back-to-school', date: (y) => new Date(y, 7, 15) },
+    halloween: { label: 'Halloween', name: 'Halloween', rush: 'Halloween', gift: 'Halloween', date: (y) => new Date(y, 9, 31) },
+    summer: { label: 'Summer', name: 'summer', rush: 'the summer rush', gift: 'summer', date: (y) => new Date(y, 5, 21) },
+    thanksgiving: { label: 'Thanksgiving', name: 'Thanksgiving', rush: 'Thanksgiving', gift: 'Thanksgiving', date: (y) => nthWeekday(y, 10, 4, 4) },
+    ramadan: { label: 'Ramadan / Eid', name: 'Ramadan and Eid', rush: 'Ramadan and Eid', gift: 'Eid gift' },
+  };
+
+  function daysTo(seasonKey, now = new Date()) {
+    const s = SEASONS[seasonKey];
+    if (!s || !s.date) return null;
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    let d = s.date(now.getFullYear());
+    if (seasonKey === 'newyear') d = new Date(now.getFullYear() + 1, 0, 1);
+    if (d < today) d = s.date(now.getFullYear() + 1);
+    return Math.round((d - today) / 864e5);
+  }
+
+  /* ---------------- Helpers ---------------- */
   const VIDEO_IDEAS = {
     'Pet supplies': 'a dog or cat actually using it',
     'Beauty & skincare': 'a real customer applying it',
     'Hair care': 'a quick before-and-after',
-    'Fashion & apparel': 'a try-on haul',
+    'Fashion & apparel': 'a try-on clip',
     'Jewelry & accessories': 'a gift-unboxing reaction',
     'Home & decor': 'a cozy room reveal',
-    Kitchen: 'a 15-second recipe using it',
+    Kitchen: 'a quick recipe using it',
     'Tech & gadgets': 'a quick unboxing and demo',
     Fitness: 'a real workout using it',
     'Supplements & wellness': 'a morning-routine clip',
     'Baby & kids': 'a parent showing it in action',
     'Outdoor & travel': 'it being used outdoors',
-    Automotive: 'a quick install and demo in a real car',
+    Automotive: 'a quick install in a real car',
   };
 
   const GENERIC_LOCALS = /^(info|hello|hi|hey|support|contact|sales|admin|team|shop|store|orders?|help|care|customercare|customerservice|service|office|mail|marketing|partnerships?|press|wholesale|enquiries|inquiries|billing|general|returns|accounts?|business|ecom|online|web|webmaster)$/;
 
-  // Words that commonly push cold emails into spam. Used as a final safety pass on every email.
   const SPAM_SWAPS = [
     [/\bfor free\b/gi, ''],
     [/\bfree\b/gi, ''],
@@ -42,16 +86,10 @@
     [/\bboost\b/gi, 'improve'],
     [/!+/g, '.'],
   ];
-
   function cleanSpam(s) {
     let out = s;
     SPAM_SWAPS.forEach(([re, rep]) => (out = out.replace(re, rep)));
-    return out.replace(/[ \t]{2,}/g, ' ').replace(/ \./g, '.').replace(/ \?/g, '?');
-  }
-
-  function daysToChristmas(now = new Date()) {
-    const xmas = new Date(now.getFullYear(), 11, 25);
-    return Math.ceil((xmas - now) / 864e5);
+    return out.replace(/[ \t]{2,}/g, ' ').replace(/ \./g, '.').replace(/ \?/g, '?').replace(/ ,/g, ',');
   }
 
   function firstName(email) {
@@ -64,16 +102,13 @@
   }
 
   function hashStr(s) {
-    let h = 0;
-    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-    return Math.abs(h);
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+    return h >>> 0;
   }
-
-  function plural(n, one, many) {
-    return n === 1 ? one : many || one + 's';
-  }
-
-  // Turns a percentage into words, so emails carry no "%" signs.
+  const pick = (arr, seed) => arr[hashStr(seed) % arr.length];
+  const plural = (n, one, many) => (n === 1 ? one : many || one + 's');
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
   function share(n) {
     if (n >= 95) return 'almost all';
     if (n >= 70) return 'most';
@@ -81,183 +116,161 @@
     if (n >= 30) return 'about a third';
     return 'a lot';
   }
-  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-  function buildCtx(a, email, settings) {
-    const days = daysToChristmas();
+  /* ---------------- Compliments (only true ones are used) ---------------- */
+  function compliments(a, c) {
     const bs = a.bestseller || {};
-    const store = a.storeName || a.domain;
-    return {
-      name: firstName(email) || `${store} team`,
-      store,
-      domain: a.domain,
-      product: bs.short || 'your bestseller',
-      photos: bs.photos ?? 0,
-      descWords: bs.descWords ?? 0,
-      idea: VIDEO_IDEAS[a.niche] || 'a real person unboxing and using it',
-      when: days > 1 ? `${days} days before Christmas` : days >= 0 ? 'right before Christmas' : 'ahead of the New Year',
-      season: days >= 0 ? 'Christmas' : 'New Year',
-      speedScore: a.speed?.score,
-      speedSec: a.speed?.estLoadSec,
-      speedSource: a.speed?.source,
-      apps: a.speed?.appScripts,
-      theme: a.design?.theme || 'an older theme',
-      cat: a.catalog || {},
-      share,
-      cap,
-      sig: settings.signature || 'Meshach',
-      link: settings.includeLink && settings.portfolio ? settings.portfolio : '',
-    };
+    const list = [];
+    if (bs.reviewCount >= 20)
+      list.push(`${bs.reviewCount} reviews on ${c.product}${bs.rating ? ` with a ${bs.rating} rating` : ''} is seriously impressive.`);
+    if (bs.short) {
+      list.push(`${c.product} is a great product. I can see why it's one of your best.`);
+      list.push(`I really like ${c.product}. It stands out from what I usually see in this space.`);
+    }
+    if (a.design?.paidTheme || (a.design?.score || 0) >= 75) list.push(`${c.store} looks clean and well put together. You can tell real care went into it.`);
+    if (a.socials?.instagram || a.socials?.tiktok) list.push(`I came across ${c.store} and liked the brand right away. Your social presence makes it feel real and trustworthy.`);
+    if ((a.productCount || 0) >= 40) list.push(`You've built a solid range at ${c.store}. That takes real work.`);
+    if (a.niche && a.niche !== 'General store') list.push(`${c.store} has a strong identity in ${a.niche.toLowerCase()}. It's clear who it's for.`);
+    list.push(`I came across ${c.store} and really like what you've built.`);
+    return list;
   }
 
-  /* ---- Templates: each returns [subject, bodyCore]; bodyCore excludes greeting and sign-off ---- */
-  const T = {
-    no_video: [
-      (c) => [
-        `Video idea for ${c.product}`,
-        `${c.product} has ${c.photos} ${plural(c.photos, 'photo')} and no video, ${c.when}.\n\nGift shoppers scroll fast. A 20-second clip of ${c.idea} stops them better than any photo.\n\nI make UGC videos for Shopify brands. Want me to send a quick concept for ${c.product}?`,
-      ],
-      (c) => [
-        `Quick thought on ${c.product}`,
-        `I pictured ${c.idea} for your ${c.product}. It would make a scroll-stopping ${c.season} video.\n\nRight now the page has no video, and that's usually where holiday shoppers drop off.\n\nI create UGC videos for Shopify stores. Should I send you the idea?`,
-      ],
+  /* ---------------- Reverse-psychology closes ---------------- */
+  const CLOSES = [
+    `Might not be a priority right now, and that's fine. Just thought you should know.`,
+    `Totally fine if you'd rather leave it as is. Most stores never fix this.`,
+    `No pressure at all. If it's not something you care about, feel free to ignore this.`,
+    `You may already have this on your list, in which case, ignore me.`,
+    `Most store owners won't bother with this. If you're one of the few who will, just reply.`,
+    `Not sure it's for you, but if you want to see how I'd do it, just say the word.`,
+    `If things are already going great, you can skip this one.`,
+  ];
+  const GREETS = ['Hi', 'Hey', 'Hello'];
+  const LEADS = [
+    'One thing is likely costing you orders: ',
+    "One thing I noticed: ",
+    "The one thing I'd fix first: ",
+    "What's likely holding back orders: ",
+    'One small thing is getting in the way: ',
+  ];
+  const SEASON_LINES = ['Best done before {rush}.', 'Worth doing before {rush}.', 'Ideally before {rush}.'];
+
+  /* ---------------- Problem + fix per issue ---------------- */
+  const P = {
+    no_video: (c) => [
+      `{L}${c.product} has no video, so shoppers can't see it in action.`,
+      `I'd make a short UGC video of ${c.idea}, the kind that gets people to add to cart.`,
     ],
-    few_photos_bestseller: [
-      (c) => [
-        `Photos on ${c.product}`,
-        `Your bestseller, ${c.product}, has only ${c.photos} ${plural(c.photos, 'photo')}. ${c.season} shoppers can't touch it, so they need to see every angle.\n\nI can create 5–6 clean product images (angles, close-ups, lifestyle) before the holiday rush.\n\nWant to see what I'd add?`,
-      ],
-      (c) => [
-        `More angles for ${c.product}?`,
-        `${c.product} is showing just ${c.photos} ${plural(c.photos, 'image')}, ${c.when}.\n\nMore angles and a lifestyle shot answer the "is this a good gift?" question before people leave.\n\nI do product photos for Shopify stores. Want me to mock up a few for ${c.product}?`,
-      ],
+    few_photos_bestseller: (c) => [
+      `{L}${c.product} has only ${c.photos} ${plural(c.photos, 'photo')}, so shoppers can't really see what they're getting.`,
+      `I'd add 4–5 clean shots: angles, close-ups and a lifestyle photo.`,
     ],
-    few_photos_catalog: [
-      (c) => [
-        `Product photos on ${c.store}`,
-        `${c.cap(c.share(c.cat.fewPhotosPct))} of the products on ${c.store} have fewer than 3 photos, ${c.when}.\n\nGift shoppers go for what they can clearly see.\n\nI create clean product and lifestyle images for Shopify stores. Want me to start with your bestseller?`,
-      ],
+    few_photos_catalog: (c) => [
+      `{L}${c.share(c.cat.fewPhotosPct)} of your products have fewer than 3 photos, which makes shoppers hesitate.`,
+      `I'd fill out each gallery with clean angles and lifestyle shots, starting with your bestseller.`,
     ],
-    low_res: [
-      (c) => [
-        `Your product photos on mobile`,
-        `${c.cap(c.share(c.cat.lowResPct))} of your product photos are under 800px wide, so they look soft on the phones most ${c.season} shoppers use.\n\nSharp images make a store look more premium.\n\nI enhance product photos for Shopify stores. Want me to redo one so you can see the difference?`,
-      ],
+    low_res: (c) => [
+      `{L}${c.share(c.cat.lowResPct)} of your product photos are low resolution, so they look blurry on phones.`,
+      `I'd enhance and resize them so every product looks sharp and premium.`,
     ],
-    mixed_ratios: [
-      (c) => [
-        `Your product grid on ${c.store}`,
-        `Your collection pages mix different photo sizes, so the grid looks uneven, especially on mobile.\n\nA clean, consistent grid makes ${c.store} look like a brand worth gifting from this ${c.season}.\n\nI can resize and tidy every product image. Want a before/after of one collection?`,
-      ],
+    mixed_ratios: (c) => [
+      `{L}your product photos are all different sizes, so collection pages look uneven on mobile.`,
+      `I'd resize them into one consistent format so the whole store looks polished.`,
     ],
-    slow_mobile: [
-      (c) => [
-        `${c.domain} on mobile`,
-        (c.speedSource === 'google'
-          ? `${c.domain} scored ${c.speedScore}/100 on Google's mobile speed test.`
-          : `${c.domain} took about ${c.speedSec}s to load in my mobile test.`) +
-          `\n\nMost ${c.season} shoppers are on phones, and many leave before a slow page finishes loading.\n\nI speed up Shopify stores in 48 hours, no redesign needed. Want me to send what's slowing it down?`,
-      ],
-      (c) => [
-        `Load time on ${c.store}`,
-        `I tested ${c.store} on mobile and it's slower than most stores I check (about ${c.speedSec}s).\n\nWith ${c.season} traffic coming, every extra second costs you shoppers.\n\nI fix Shopify speed issues without breaking anything. Should I send you the 3 biggest fixes?`,
-      ],
+    slow_mobile: (c) => [
+      c.speedSource === 'google'
+        ? `{L}${c.domain} scored ${c.speedScore}/100 on Google's mobile speed test, and most shoppers leave slow pages.`
+        : `{L}${c.domain} takes about ${c.speedSec}s to load on mobile, and most shoppers leave before it finishes.`,
+      `I'd speed it up in 48 hours without changing your design.`,
     ],
-    app_bloat: [
-      (c) => [
-        `${c.store} and its apps`,
-        `${c.apps} different app scripts load before your homepage even shows up.\n\nThat's a big reason stores feel slow on phones, right when ${c.season} traffic peaks.\n\nI clean up app clutter on Shopify stores without losing features. Want a quick list of what can go?`,
-      ],
+    app_bloat: (c) => [
+      `{L}${c.apps} app scripts load before your homepage shows, which makes it slow on phones.`,
+      `I'd remove what you don't need and keep everything that works.`,
     ],
-    thin_desc_bestseller: [
-      (c) => [
-        `The ${c.product} page`,
-        `Your bestseller, ${c.product}, has a ${c.descWords}-word description. That's the spot where ${c.season} gift shoppers decide.\n\nI rewrite product pages around benefits, sizing, a gift angle and Google keywords.\n\nWant me to rewrite ${c.product} as a sample?`,
-      ],
+    thin_desc_bestseller: (c) => [
+      `{L}the ${c.product} description is only ${c.descWords} words, so it doesn't answer what shoppers want to know before they commit.`,
+      `I'd rewrite it around benefits, sizing and common questions, with the right Google keywords.`,
     ],
-    thin_desc_catalog: [
-      (c) => [
-        `Product pages on ${c.store}`,
-        `${c.cap(c.share(c.cat.thinDescPct))} of the product descriptions on ${c.store} are under 50 words, ${c.when}.\n\nShort pages don't answer shopper questions, and they don't rank on Google either.\n\nI optimize Shopify product pages. Want me to redo your bestseller first?`,
-      ],
+    thin_desc_catalog: (c) => [
+      `{L}${c.share(c.cat.thinDescPct)} of your product descriptions are under 50 words, so shoppers don't get enough reason to commit.`,
+      `I'd rewrite them around benefits and common questions, starting with your bestseller.`,
     ],
-    no_reviews: [
-      (c) => [
-        `Reviews on ${c.product}?`,
-        `I couldn't find a single review on ${c.product}. At ${c.season}, people pick what others already trust.\n\nI can set up photo reviews and an automatic review-request email, so trust builds before the rush.\n\nWant me to set it up for ${c.store}?`,
-      ],
+    no_reviews: (c) => [
+      `{L}${c.product} doesn't show any reviews, and new visitors rarely order without seeing them.`,
+      `I'd set up photo reviews and an automatic review request after each order.`,
     ],
-    no_email_capture: [
-      (c) => [
-        `${c.store} visitors this ${c.season}`,
-        `Every shopper who leaves ${c.store} this ${c.season} is gone for good. There's no email signup to bring them back.\n\nI set up signup popups and abandoned-cart emails that bring people back automatically.\n\nWant to see how it would look on your store?`,
-      ],
+    no_email_capture: (c) => [
+      `{L}there's no email signup, so visitors who leave never come back.`,
+      `I'd set up a simple signup popup and an abandoned-cart email that brings people back automatically.`,
     ],
-    no_upsell: [
-      (c) => [
-        `Gift bundles for ${c.store}`,
-        `${c.season} shoppers pick gifts in twos and threes, but ${c.store} has no bundle or "add one more" option.\n\nA simple bundle with ${c.product} raises the size of every order right when traffic peaks.\n\nWant me to set it up for you?`,
-      ],
+    no_upsell: (c) => [
+      `{L}there's no bundle or "add one more" option, so most customers check out with a single item.`,
+      `I'd add a simple bundle on ${c.product} so every order gets bigger.`,
     ],
-    no_christmas: [
-      (c) => [
-        `${c.store} and Christmas`,
-        `${c.store} doesn't have a Christmas gift section yet, ${c.when}. Gift shoppers search "gifts for her", not product names.\n\nI can build a gift guide page, holiday banner and shipping-cutoff countdown in 2–3 days.\n\nWant me to put it together?`,
-      ],
-      (c) => [
-        `Christmas page for ${c.store}?`,
-        `I looked for a Christmas or gift page on ${c.store} and couldn't find one.\n\nThat's where most holiday shoppers start, and ${c.product} would fit perfectly in a "Top Gifts" section.\n\nI set up Christmas pages for Shopify stores. Should I send a quick mockup?`,
-      ],
+    no_christmas: (c) => [
+      c.season
+        ? `{L}there's no ${c.season.gift} section yet, and that's where holiday shoppers start.`
+        : `{L}there's no gift section, and gift shoppers search by who they're shopping for, not product names.`,
+      `I'd build a gift guide page with a homepage banner, ready in 2–3 days.`,
     ],
-    no_pixels: [
-      (c) => [
-        `${c.season} visitors to ${c.store}`,
-        `There's no Meta or TikTok pixel on ${c.domain}, so every ${c.season} visitor who leaves can't be reached again.\n\nReaching people who already visited is the easiest win of the season.\n\nI set up pixels and tracking properly in a day. Want me to do it before the rush?`,
-      ],
+    no_pixels: (c) => [
+      `{L}there's no Meta or TikTok pixel, so you can't reach visitors again after they leave.`,
+      `I'd set up tracking properly in a day so your ads can bring them back.`,
     ],
-    old_theme: [
-      (c) => [
-        `The theme on ${c.store}`,
-        `${c.store} runs on ${c.theme}, an older Shopify theme that's slower and harder to update.\n\nA modern theme gives you faster pages and drag-and-drop Christmas sections.\n\nI can move you over without losing anything. Want a quick preview of how it'd look?`,
-      ],
+    old_theme: (c) => [
+      `{L}it runs on ${c.theme}, an older Shopify theme that's slower and harder to update.`,
+      `I'd move you to a modern, faster theme without losing anything.`,
     ],
-    myshopify: [
-      (c) => [
-        `Your store address`,
-        `${c.store} still uses a .myshopify.com address. Many ${c.season} shoppers don't trust that at checkout.\n\nA proper domain plus a quick trust cleanup makes you look like an established brand.\n\nI can set it all up in a day. Want me to handle it?`,
-      ],
+    myshopify: (c) => [
+      `{L}the store still uses a .myshopify.com address, which makes some shoppers hesitate at checkout.`,
+      `I'd connect a proper domain and tidy up the trust signals.`,
     ],
-    sold_out: [
-      (c) => [
-        `Sold-out items on ${c.store}`,
-        `${c.cap(c.share(c.cat.soldOutPct))} of the products on ${c.store} show "Sold out", ${c.when}.\n\nThat's space where gift shoppers should see things they can get.\n\nI can reorganize your collections and add back-in-stock alerts. Want me to set it up?`,
-      ],
+    sold_out: (c) => [
+      `{L}${c.share(c.cat.soldOutPct)} of your products show "Sold out", which sends shoppers away.`,
+      `I'd reorganize your collections and add back-in-stock alerts.`,
     ],
-    no_express: [
-      (c) => [
-        `Checkout on ${c.product}`,
-        `${c.product} has no Shop Pay, Apple Pay or Google Pay button on the product page.\n\nOne-tap checkout matters most at ${c.season}, when people are shopping on their phones in a hurry.\n\nI can switch it on and tidy up checkout in an hour. Want me to?`,
-      ],
+    no_express: (c) => [
+      `{L}${c.product} has no Shop Pay or Apple Pay button, so checkout takes longer than it should.`,
+      `I'd switch on one-tap checkout in under an hour.`,
     ],
-    weak_seo: [
-      (c) => [
-        `${c.store} on Google`,
-        `${c.store} is missing basic Google setup: page descriptions and image alt text.\n\n${c.season} gift searches are picking up now, and these are quick fixes.\n\nI do Shopify SEO cleanups in a few days. Want me to send what I'd fix first?`,
-      ],
+    weak_seo: (c) => [
+      `{L}the store is missing page descriptions and image alt text, so Google barely shows it.`,
+      `I'd fix the basics so you start showing up in searches.`,
     ],
-    weak_titles: [
-      (c) => [
-        `Product titles on ${c.store}`,
-        `${c.cap(c.share(c.cat.shortTitlePct))} of your product titles are just 1–2 words, so Google and shoppers can't tell what they are.\n\nClear, descriptive titles bring in ${c.season} gift searches.\n\nI optimize Shopify product titles and pages. Want me to redo your top 5 as a sample?`,
-      ],
+    weak_titles: (c) => [
+      `{L}${c.share(c.cat.shortTitlePct)} of your product titles are only 1–2 words, so Google and shoppers can't tell what they are.`,
+      `I'd rewrite them to be clear and searchable.`,
     ],
-    fallback: [
-      (c) => [
-        `${c.season} idea for ${c.store}`,
-        `I was looking at ${c.product} on ${c.store} and pictured ${c.idea}. It would make a great ${c.season} video.\n\nShort, real-person videos are what's working best this season.\n\nI make UGC videos for Shopify brands. Want me to send a quick concept?`,
-      ],
+    fallback: (c) => [
+      `The one thing I'd add is video. Right now shoppers only see photos of ${c.product}.`,
+      `I'd make a short UGC video of ${c.idea}.`,
     ],
   };
+
+  const SUBJECTS = {
+    no_video: (c) => [`Video for ${c.product}`, `Quick idea for ${c.product}`],
+    few_photos_bestseller: (c) => [`Photos on ${c.product}`, `${c.product} photos`],
+    few_photos_catalog: (c) => [`Product photos on ${c.store}`],
+    low_res: (c) => [`Your product photos`],
+    mixed_ratios: (c) => [`Your product grid`],
+    slow_mobile: (c) => [`${c.store} on mobile`, `Load time on ${c.store}`],
+    app_bloat: (c) => [`${c.store} on mobile`],
+    thin_desc_bestseller: (c) => [`The ${c.product} page`],
+    thin_desc_catalog: (c) => [`Product pages on ${c.store}`],
+    no_reviews: (c) => [`Reviews on ${c.product}`],
+    no_email_capture: (c) => [`Visitors to ${c.store}`],
+    no_upsell: (c) => [`Bundles on ${c.store}`],
+    no_christmas: (c) => [c.season ? `${c.season.name} at ${c.store}` : `Gift page for ${c.store}`],
+    no_pixels: (c) => [`Visitors to ${c.store}`],
+    old_theme: (c) => [`The theme on ${c.store}`],
+    myshopify: (c) => [`Your store address`],
+    sold_out: (c) => [`Sold-out items on ${c.store}`],
+    no_express: (c) => [`Checkout on ${c.store}`],
+    weak_seo: (c) => [`${c.store} on Google`],
+    weak_titles: (c) => [`Product titles on ${c.store}`],
+    fallback: (c) => [`Quick idea for ${c.store}`],
+  };
+  const GENERIC_SUBJECTS = (c) => [`Quick note about ${c.store}`, `Question about ${c.store}`, `A thought on ${c.product}`, `${c.store}`];
 
   const SERVICE_OF = {
     no_video: 'UGC videos',
@@ -272,7 +285,7 @@
     no_reviews: 'Reviews setup',
     no_email_capture: 'Email marketing',
     no_upsell: 'Upsells & bundles',
-    no_christmas: 'Christmas store setup',
+    no_christmas: 'Seasonal / gift page setup',
     no_pixels: 'Ads pixel setup',
     old_theme: 'Store redesign',
     myshopify: 'Store setup',
@@ -283,24 +296,70 @@
     fallback: 'UGC videos',
   };
 
+  const VARIANTS = 6; // "Rewrite" cycles through these
+
+  function buildCtx(a, email, settings) {
+    const bs = a.bestseller || {};
+    const store = a.storeName || a.domain;
+    const sKey = settings.season || 'none';
+    const season = sKey !== 'none' && SEASONS[sKey] ? SEASONS[sKey] : null;
+    return {
+      fname: firstName(email),
+      store,
+      domain: a.domain,
+      product: bs.short || 'your bestseller',
+      photos: bs.photos ?? 0,
+      descWords: bs.descWords ?? 0,
+      idea: VIDEO_IDEAS[a.niche] || 'a real person unboxing and using it',
+      speedScore: a.speed?.score,
+      speedSec: a.speed?.estLoadSec,
+      speedSource: a.speed?.source,
+      apps: a.speed?.appScripts,
+      theme: a.design?.theme || 'an older theme',
+      cat: a.catalog || {},
+      season,
+      share,
+      sig: settings.signature || 'Meshach',
+      link: settings.includeLink && settings.portfolio ? settings.portfolio : '',
+    };
+  }
+
   function pickIssue(a, disabledServices) {
     const off = new Set(disabledServices || []);
-    const list = (a.issues || []).filter((i) => T[i.key] && !off.has(SERVICE_OF[i.key]));
+    const list = (a.issues || []).filter((i) => P[i.key] && !off.has(SERVICE_OF[i.key]));
     return list[0] ? list[0].key : 'fallback';
   }
 
   function compose(a, opts, settings) {
-    const email = opts.email;
-    const key = opts.issueKey && T[opts.issueKey] ? opts.issueKey : pickIssue(a, settings.disabledServices);
-    const c = buildCtx(a, email, settings);
-    const variants = T[key];
-    const idx = (((opts.variant ?? hashStr(a.domain)) % variants.length) + variants.length) % variants.length;
-    const [subject, core] = variants[idx](c);
-    let body = `Hi ${c.name},\n\n${cleanSpam(core)}`;
+    const key = opts.issueKey && P[opts.issueKey] ? opts.issueKey : pickIssue(a, settings.disabledServices);
+    const c = buildCtx(a, opts.email, settings);
+    const v = Number.isInteger(opts.variant) ? ((opts.variant % VARIANTS) + VARIANTS) % VARIANTS : hashStr(a.domain) % VARIANTS;
+    const seed = (part) => `${a.domain}|${v}|${part}`;
+
+    const greet = pick(GREETS, seed('g'));
+    const who = c.fname || `${c.store} team`;
+    const compliment = pick(compliments(a, c), seed('c'));
+    const [rawProblem, fix] = P[key](c);
+    const problem = rawProblem.replace('{L}', pick(LEADS, seed('l')));
+    const seasonLine = c.season ? ' ' + pick(SEASON_LINES, seed('s')).replace('{rush}', c.season.rush) : '';
+    const close = pick(CLOSES, seed('x'));
+    const subject = pick([...SUBJECTS[key](c), ...GENERIC_SUBJECTS(c)], seed('subj'));
+
+    let body = `${greet} ${who},\n\n${compliment}\n\n${problem}\n\n${fix}${seasonLine}\n\n${close}`;
+    body = cleanSpam(body);
     if (c.link) body += `\n\nSamples: ${c.link}`;
     body += `\n\n${c.sig}`;
-    return { key, service: SERVICE_OF[key], variant: idx, variants: variants.length, subject: cleanSpam(subject), body };
+    return { key, service: SERVICE_OF[key], variant: v, variants: VARIANTS, subject: cleanSpam(subject), body };
   }
 
-  global.Pitches = { compose, pickIssue, cleanSpam, SERVICE_OF, SERVICES: [...new Set(Object.values(SERVICE_OF))], daysToChristmas, firstName };
+  global.Pitches = {
+    compose,
+    pickIssue,
+    cleanSpam,
+    SERVICE_OF,
+    SERVICES: [...new Set(Object.values(SERVICE_OF))],
+    SEASONS,
+    daysTo,
+    firstName,
+  };
 })(window);
