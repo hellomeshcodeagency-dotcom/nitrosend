@@ -101,6 +101,28 @@ label.f{display:block;font:600 11px var(--mono);letter-spacing:.1em;text-transfo
 .toolbar select{width:auto}
 .spacer{flex:1}
 
+/* Lookup */
+.lookup{margin-bottom:14px;padding:14px 16px}
+.lookup .ptitle{margin-bottom:10px}
+.lk-row{display:flex;gap:8px;align-items:flex-start}
+.lk-row textarea{flex:1;min-height:44px;resize:vertical;font:13.5px/1.5 var(--mono)}
+.lk-row .btn{height:44px}
+.lk-res{margin-top:10px;background:var(--bg);border:1px solid var(--line-2);border-left:4px solid var(--ok);border-radius:10px;padding:12px 14px}
+.lk-res.miss{border-left-color:var(--hot)}
+.lk-res.domain{border-left-color:var(--warm)}
+.lk-top{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline}
+.lk-q{font:600 12px var(--mono);color:var(--dim)}
+.lk-store{font:700 18px/1.2 var(--display);margin-top:4px}
+.lk-store a{color:var(--nitro);text-decoration:none;font:500 13px var(--mono);margin-left:8px}
+.lk-store a:hover{text-decoration:underline}
+.lk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:6px 16px;margin-top:10px}
+.lk-grid div{font-size:13px}
+.lk-grid span{display:block;font:500 10px var(--mono);color:var(--mute);letter-spacing:.08em;text-transform:uppercase}
+.lk-res details{margin-top:10px}
+.lk-res summary{cursor:pointer;font:600 12px var(--mono);color:var(--nitro)}
+.lk-res pre{white-space:pre-wrap;font:13px/1.5 var(--body);color:#C4CCDA;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0 0}
+.lk-acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+@media (max-width:640px){.lk-row{flex-wrap:wrap}.lk-row textarea{flex-basis:100%}.lk-row .btn{flex:1}}
 .sendbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:linear-gradient(90deg,rgba(34,211,255,.08),rgba(124,92,255,.08));border:1px solid var(--line-2);border-radius:12px;padding:12px 14px;margin-bottom:14px}
 .sendbar .meta{font:12px var(--mono);color:var(--dim)}
 .sendbar .meta b{color:var(--text)}
@@ -275,6 +297,16 @@ kbd{font:11px var(--mono);border:1px solid var(--line-2);border-bottom-width:2px
 
   <!-- ================= SEND ================= -->
   <section class="view" id="v-send">
+    <div class="panel lookup">
+      <h3 class="ptitle">Lookup: which store is this email from?</h3>
+      <div class="lk-row">
+        <textarea id="lkIn" rows="1" placeholder="Type or paste an email, e.g. jane@glowskin.com (several? one per line)"></textarea>
+        <button class="btn go" id="lkBtn" type="button">Find store</button>
+        <button class="btn sm" id="lkClear" type="button">Clear</button>
+      </div>
+      <div id="lkOut"></div>
+    </div>
+
     <div class="sendbar">
       <div class="meta" id="nextMeta">—</div>
       <span class="spacer"></span>
@@ -1029,6 +1061,107 @@ $('#exportCsv').addEventListener('click', () => {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = `nitrosend-${today()}.csv`; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
+
+/* ======================= Lookup: email → store ======================= */
+const FREE_MAIL = /^(gmail|googlemail|yahoo|ymail|outlook|hotmail|live|msn|icloud|me|mac|aol|proton|protonmail|pm|gmx|mail|zoho|yandex|qq|163)\./;
+const rootDomain = (h) => String(h || '').toLowerCase().replace(/^www\./, '');
+
+function lookupEmail(raw) {
+  const q = raw.trim().toLowerCase().replace(/^mailto:/, '');
+  const m = q.match(EMAIL_RE);
+  if (!m) return { q: raw.trim(), kind: 'invalid', hits: [] };
+  const email = m[0].toLowerCase();
+  // 1) exact email match: the email used, or any email found on the store
+  let hits = leads.filter((l) => l.email === email || (l.a?.emails || []).includes(email));
+  if (hits.length) return { q: email, kind: 'exact', hits };
+  // 2) same domain (skip Gmail/Yahoo/etc. — those can't point to a store)
+  const dom = rootDomain(email.split('@')[1]);
+  if (!FREE_MAIL.test(dom)) {
+    hits = leads.filter((l) => {
+      const d1 = rootDomain(l.domain), d2 = rootDomain(l.a?.domain);
+      const emailDoms = (l.a?.emails || []).concat(l.email || []).map((e) => rootDomain(e.split('@')[1]));
+      return [d1, d2, ...emailDoms].some((d) => d && (d === dom || d.endsWith('.' + dom) || dom.endsWith('.' + d)));
+    });
+    if (hits.length) return { q: email, kind: 'domain', hits };
+  }
+  return { q: email, kind: 'miss', hits: [], free: FREE_MAIL.test(dom) };
+}
+
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) + ', ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+function lookupCard(r) {
+  if (r.kind === 'invalid') return `<div class="lk-res miss"><div class="lk-q">"${esc(r.q)}"</div><div class="lk-store">That doesn't look like an email address</div></div>`;
+  if (r.kind === 'miss') {
+    return `<div class="lk-res miss"><div class="lk-q">${esc(r.q)}</div><div class="lk-store">Not in your NitroSend list</div>
+      <div class="hint">${r.free ? 'This is a personal email (Gmail, Yahoo, etc.), and it isn’t saved on any of your stores.' : 'No store you’ve uploaded has this email or domain.'}</div></div>`;
+  }
+  return r.hits.map((l) => {
+    const a = l.a || {};
+    const name = a.storeName || l.domain;
+    const url = a.url || `https://${l.domain}`;
+    const status = l.sent
+      ? `<b style="color:var(--ok)">Sent</b> ${esc(fmtDate(l.sentAt))}`
+      : l.skipped ? '<b style="color:var(--dim)">Skipped</b>'
+      : l.status === 'failed' ? '<b style="color:var(--hot)">Analysis failed</b>'
+      : l.status === 'done' ? (l.email ? '<b style="color:var(--warm)">Not sent yet</b>' : '<b style="color:var(--warm)">No email</b>')
+      : `<b>${esc(l.status)}</b>`;
+    return `<div class="lk-res ${r.kind === 'domain' ? 'domain' : ''}" data-id="${l.id}">
+      <div class="lk-top">
+        <div class="lk-q">${esc(r.q)} · ${r.kind === 'exact' ? 'exact email match' : 'matched by domain'}</div>
+      </div>
+      <div class="lk-store">${esc(name)}<a href="${esc(url)}" target="_blank" rel="noopener">${esc(rootDomain(a.domain || l.domain))} ↗</a></div>
+      <div class="lk-grid">
+        <div><span>Status</span>${status}</div>
+        <div><span>Sent from</span>${esc(l.sentFrom || (l.sent ? 'Default mail app' : '—'))}</div>
+        <div><span>Emailed to</span>${esc(l.email || '—')}</div>
+        <div><span>Pitched</span>${esc(l.service || '—')}</div>
+        ${a.niche ? `<div><span>Niche</span>${esc(a.niche)}</div>` : ''}
+        ${a.country ? `<div><span>Country</span>${esc(a.country)}</div>` : ''}
+      </div>
+      ${l.subject ? `<details><summary>${l.sent ? 'Show the email you sent' : 'Show the email (not sent yet)'}</summary><pre><b>Subject:</b> ${esc(l.subject)}\n\n${esc(l.body)}</pre></details>` : ''}
+      <div class="lk-acts">
+        ${a.ok ? '<button class="btn sm" data-lk="analysis" type="button">Analysis</button>' : ''}
+        <button class="btn sm" data-lk="show" type="button">Show in list</button>
+        <button class="btn sm" data-lk="copy" type="button">Copy URL</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function runLookup() {
+  const lines = $('#lkIn').value.split(/[\n,;\s]+/).map((s) => s.trim()).filter(Boolean);
+  if (!lines.length) { $('#lkOut').innerHTML = ''; return; }
+  if (!leads.length) { $('#lkOut').innerHTML = '<div class="lk-res miss"><div class="lk-store">No stores saved yet</div><div class="hint">Upload store links in the Load tab first.</div></div>'; return; }
+  const seen = new Set();
+  $('#lkOut').innerHTML = lines.filter((x) => !seen.has(x.toLowerCase()) && seen.add(x.toLowerCase())).slice(0, 50).map((x) => lookupCard(lookupEmail(x))).join('');
+}
+
+$('#lkBtn').addEventListener('click', runLookup);
+$('#lkIn').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runLookup(); }
+});
+$('#lkIn').addEventListener('paste', () => setTimeout(runLookup, 0));
+$('#lkClear').addEventListener('click', () => { $('#lkIn').value = ''; $('#lkOut').innerHTML = ''; $('#lkIn').focus(); });
+$('#lkOut').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-lk]'); if (!b) return;
+  const l = byId(b.closest('.lk-res').dataset.id); if (!l) return;
+  if (b.dataset.lk === 'analysis') showDetails(l);
+  else if (b.dataset.lk === 'copy') {
+    const url = l.a?.url || `https://${l.domain}`;
+    try { await navigator.clipboard.writeText(url); toast('URL copied'); } catch { prompt('Copy this URL:', url); }
+  } else if (b.dataset.lk === 'show') {
+    view.filter = 'all'; view.service = ''; view.q = l.domain; view.page = 0;
+    $$('#fChips .chip').forEach((c) => c.classList.toggle('on', c.dataset.f === 'all'));
+    $('#fService').value = ''; $('#fSearch').value = l.domain;
+    renderList(); updateFixedSend();
+    const card = $(`.lead[data-id="${l.id}"]`);
+    if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.style.boxShadow = '0 0 0 2px var(--nitro)'; setTimeout(() => (card.style.boxShadow = ''), 2000); }
+  }
 });
 
 /* ======================= Settings ======================= */
