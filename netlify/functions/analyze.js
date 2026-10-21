@@ -293,6 +293,59 @@ function cleanTitle(t) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Owner / founder name                                                 */
+/* ------------------------------------------------------------------ */
+const NOT_NAMES = new Set(
+  ('the our we us you your my this that shop store team brand company family hello hi hey welcome about home founder founders cofounder owner ceo ' +
+    'story mission love thanks thank customer customers support service shopify contact email info privacy policy terms shipping returns ' +
+    'mr mrs ms miss dr sir madam dear all everyone friends people women men kids baby pet pets dog dogs cat cats christmas holiday ' +
+    'january february march april may june july august september october november december monday tuesday wednesday thursday friday saturday sunday ' +
+    'new york london paris usa america canada australia california texas florida')
+    .split(/\s+/)
+);
+
+function validName(n, storeWords) {
+  if (!n) return false;
+  const first = n.split(/\s+/)[0];
+  if (!/^[A-Z][a-z]{2,14}$/.test(first)) return false;
+  const lw = first.toLowerCase();
+  if (NOT_NAMES.has(lw) || storeWords.has(lw)) return false;
+  return true;
+}
+
+function findOwner(sources, storeName) {
+  const storeWords = new Set(String(storeName || '').toLowerCase().split(/[^a-z]+/).filter(Boolean));
+  const NAME = "([A-Z][a-z]{2,14}(?:\\s[A-Z][a-z'\\-]{1,20})?)";
+  const textPatterns = [
+    [new RegExp(`\\bfounded (?:in \\d{4} )?by ${NAME}`), 'founded by'],
+    [new RegExp(`\\b(?:started|created|launched) (?:in \\d{4} )?by ${NAME}`), 'started by'],
+    [new RegExp(`\\b(?:Hi|Hello|Hey)[,!.]?\\s+I(?:'|’)?m ${NAME}`), 'intro'],
+    [new RegExp(`\\bmy name is ${NAME}`, 'i'), 'my name is'],
+    [new RegExp(`${NAME},?\\s+(?:the\\s+)?(?:Founder|Co-Founder|Cofounder|Owner|CEO)\\b`), 'title'],
+    [new RegExp(`\\b(?:Founder|Co-Founder|Owner|CEO)(?:\\s+&\\s+\\w+)?\\s*[:,\\-–—]\\s*${NAME}`), 'title'],
+    [new RegExp(`\\b(?:Love|Cheers|Warmly|xo|XO),?\\s*[-–—]?\\s*${NAME}\\s*$`, 'm'), 'signoff'],
+  ];
+  for (const { html, label } of sources) {
+    if (!html) continue;
+    // JSON-LD founder
+    const jl = html.match(/"founder"\s*:\s*\{[^}]*?"name"\s*:\s*"([^"]{3,40})"/i) || html.match(/"founder"\s*:\s*"([^"]{3,40})"/i);
+    if (jl && validName(jl[1].trim(), storeWords)) {
+      const full = jl[1].trim();
+      return { first: full.split(/\s+/)[0], full, source: `${label} (founder data)` };
+    }
+    const text = stripTags(html);
+    for (const [re, how] of textPatterns) {
+      const m = text.match(re);
+      if (m && validName(m[1], storeWords)) {
+        const full = m[1].trim();
+        return { first: full.split(/\s+/)[0], full, source: `${label} (${how})` };
+      }
+    }
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
 /* Main analysis                                                        */
 /* ------------------------------------------------------------------ */
 async function analyze(base) {
@@ -338,13 +391,17 @@ async function analyze(base) {
   if (best) bestHandle = best.handle;
 
   // Phase 2
-  const [pJs, pHtml, contact, contactInfo, privacy] = await Promise.all([
+  const [pJs, pHtml, contact, contactInfo, privacy, about1, about2, about3] = await Promise.all([
     bestHandle ? get(`${base}/products/${bestHandle}.js`, 3500) : Promise.resolve({ ok: false, text: '' }),
     bestHandle ? get(`${base}/products/${bestHandle}`, 3500) : Promise.resolve({ ok: false, text: '' }),
     get(base + '/pages/contact', 3500),
     get(base + '/policies/contact-information', 3500),
     get(base + '/policies/privacy-policy', 3500),
+    get(base + '/pages/about', 3500),
+    get(base + '/pages/about-us', 3500),
+    get(base + '/pages/our-story', 3500),
   ]);
+  const aboutHtml = [about1, about2, about3].filter((r) => r.ok).map((r) => r.text).join('\n');
   const pdp = pHtml.text || '';
   const pdpLower = pdp.toLowerCase();
   const pData = pJs.ok ? safeJson(pJs.text) : null;
@@ -358,6 +415,7 @@ async function analyze(base) {
       ...extractEmails(contactInfo.text || ''),
       ...extractEmails(privacy.text || ''),
       ...extractEmails(pdp),
+      ...extractEmails(aboutHtml),
     ],
     finalHost
   ).slice(0, 5);
@@ -609,6 +667,14 @@ async function analyze(base) {
     domain: finalHost,
     isShopify,
     storeName: storeName.slice(0, 60),
+    owner: findOwner(
+      [
+        { html: aboutHtml, label: 'About page' },
+        { html, label: 'Homepage' },
+        { html: contact.text || '', label: 'Contact page' },
+      ],
+      storeName
+    ),
     country: meta?.country || null,
     currency,
     niche,
