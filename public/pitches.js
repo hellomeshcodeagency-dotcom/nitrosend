@@ -304,7 +304,7 @@
     const sKey = settings.season || 'none';
     const season = sKey !== 'none' && SEASONS[sKey] ? SEASONS[sKey] : null;
     return {
-      fname: firstName(email),
+      fname: firstName(email) || (a.owner && a.owner.first) || null,
       store,
       domain: a.domain,
       product: bs.short || 'your bestseller',
@@ -352,8 +352,70 @@
     return { key, service: SERVICE_OF[key], variant: v, variants: VARIANTS, subject: cleanSpam(subject), body };
   }
 
+  /* ---------------- Follow-ups ---------------- */
+  const SUMMARY = {
+    no_video: (c) => `${c.product} has no video yet`,
+    few_photos_bestseller: (c) => `${c.product} only has ${c.photos} ${plural(c.photos, 'photo')}`,
+    few_photos_catalog: () => `most of your products are short on photos`,
+    low_res: () => `a lot of your product photos look blurry on phones`,
+    mixed_ratios: () => `your product grid looks uneven on mobile`,
+    slow_mobile: () => `the store is slow to load on mobile`,
+    app_bloat: () => `extra app scripts are slowing the store down`,
+    thin_desc_bestseller: (c) => `the ${c.product} description is very short`,
+    thin_desc_catalog: () => `most product descriptions are very short`,
+    no_reviews: (c) => `${c.product} isn't showing any reviews`,
+    no_email_capture: () => `there's no email signup to bring visitors back`,
+    no_upsell: () => `there's no bundle option to grow each order`,
+    no_christmas: (c) => (c.season ? `there's no ${c.season.gift} section yet` : `there's no gift section yet`),
+    no_pixels: () => `visitors can't be reached again after they leave`,
+    old_theme: () => `the store is on an older, slower theme`,
+    myshopify: () => `the store still uses a .myshopify.com address`,
+    sold_out: () => `a lot of products are showing "Sold out"`,
+    no_express: () => `there's no one-tap checkout button`,
+    weak_seo: () => `Google can barely find the store`,
+    weak_titles: () => `the product titles are too short to be found`,
+    fallback: (c) => `${c.product} could use a short video`,
+  };
+  const FU1_OPEN = [
+    'Just floating this back up in case it got buried.',
+    'Bumping this to the top of your inbox.',
+    'Quick follow-up on my last note.',
+  ];
+  const FU1_CLOSE = [
+    `If it's not a priority, no worries at all. A simple "not now" is fine too.`,
+    `Totally fine if the timing is off. Just let me know either way.`,
+    `No pressure. If you'd rather leave it, I won't keep pushing.`,
+  ];
+  const FU2_OPEN = [
+    `I'll stop reaching out after this one.`,
+    `Last note from me on this, I promise.`,
+    `I don't want to crowd your inbox, so this is my last message.`,
+  ];
+
+  // stage = 1 (first follow-up) or 2 (final follow-up)
+  function composeFollowup(a, opts, settings) {
+    const key = opts.issueKey && SUMMARY[opts.issueKey] ? opts.issueKey : pickIssue(a, settings.disabledServices);
+    const c = buildCtx(a, opts.email, settings);
+    const seed = (p) => `${a.domain}|fu${opts.stage}|${p}`;
+    const who = c.fname || `${c.store} team`;
+    const sum = SUMMARY[key](c);
+    const orig = (opts.subject || `${c.store}`).replace(/^(re:\s*)+/i, '');
+    let body;
+    if (opts.stage >= 2) {
+      const wish = c.season ? `Wishing ${c.store} a great ${c.season.name}.` : `Wishing ${c.store} all the best.`;
+      body = `${pick(GREETS, seed('g'))} ${who},\n\n${pick(FU2_OPEN, seed('o'))}\n\nIf fixing the fact that ${sum} ever becomes a priority, just reply here and I'll pick it up.\n\n${wish}`;
+    } else {
+      const seasonLine = c.season ? ` ${pick(SEASON_LINES, seed('s')).replace('{rush}', c.season.rush)}` : '';
+      body = `${pick(GREETS, seed('g'))} ${who},\n\n${pick(FU1_OPEN, seed('o'))}\n\nQuick recap: ${sum}, and I can fix that for you.${seasonLine}\n\n${pick(FU1_CLOSE, seed('x'))}`;
+    }
+    body = cleanSpam(body);
+    body += `\n\n${c.sig}`;
+    return { subject: cleanSpam(`Re: ${orig}`), body, stage: opts.stage };
+  }
+
   global.Pitches = {
     compose,
+    composeFollowup,
     pickIssue,
     cleanSpam,
     SERVICE_OF,
