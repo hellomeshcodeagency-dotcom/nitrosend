@@ -131,6 +131,16 @@ label.f{display:block;font:600 11px var(--mono);letter-spacing:.1em;text-transfo
 .lead.sent{opacity:.55}
 .lead.sent::after{content:"SENT";position:absolute;right:14px;top:-9px;font:700 10px var(--mono);letter-spacing:.12em;background:var(--ok);color:#04150C;padding:2px 8px;border-radius:5px}
 .lead.skipped{opacity:.4}
+.lead.replied{opacity:1;border-color:rgba(43,227,139,.45)}
+.lead.replied::after{content:"REPLIED"}
+.owner{font-size:12.5px;color:var(--dim);margin-top:4px}
+.owner b{color:var(--text);font-weight:600}
+a.tag.soc{text-decoration:none;color:#E879F9;border-color:rgba(232,121,249,.35);background:rgba(232,121,249,.07)}
+a.tag.soc:hover{border-color:#E879F9}
+.dupe-list{max-height:280px;overflow:auto;margin:12px 0;border:1px solid var(--line);border-radius:10px}
+.dupe-list div{display:flex;justify-content:space-between;gap:10px;padding:8px 12px;border-bottom:1px dashed var(--line);font-size:13px}
+.dupe-list div:last-child{border-bottom:0}
+.dupe-list span{color:var(--dim);font:12px var(--mono)}
 .num{font:700 13px var(--mono);color:var(--mute);padding-top:2px}
 .sname{font:700 16px/1.2 var(--display);letter-spacing:.01em;word-break:break-word}
 .sdom{font:12px var(--mono);color:var(--dim);word-break:break-all}
@@ -319,6 +329,9 @@ kbd{font:11px var(--mono);border:1px solid var(--line-2);border-bottom-width:2px
         <button class="chip on" data-f="ready">Ready<b id="cReady">0</b></button>
         <button class="chip" data-f="hot">Hot<b id="cHot">0</b></button>
         <button class="chip" data-f="sent">Sent<b id="cSent">0</b></button>
+        <button class="chip" data-f="followup">Follow-up due<b id="cFu">0</b></button>
+        <button class="chip" data-f="replied">Replied<b id="cRep">0</b></button>
+        <button class="chip" data-f="socials">No email, has socials<b id="cSoc">0</b></button>
         <button class="chip" data-f="noemail">No email<b id="cNo">0</b></button>
         <button class="chip" data-f="failed">Failed<b id="cFail">0</b></button>
         <button class="chip" data-f="all">All<b id="cAll">0</b></button>
@@ -375,6 +388,22 @@ kbd{font:11px var(--mono);border:1px solid var(--line-2);border-bottom-width:2px
         <input id="sLock" type="number" min="0" max="30" step="0.5">
         <div class="hint">Stops a fast auto clicker from sending the same email twice. Set this a little shorter than your auto clicker's interval.</div>
         <div class="senders-table" id="senderStats"></div>
+
+        <h3 class="ptitle" style="margin-top:24px">Follow-ups</h3>
+        <div class="row" style="gap:12px">
+          <div style="flex:1;min-width:140px"><label class="f" for="sFuDays">Days before a follow-up</label><input id="sFuDays" type="number" min="1" max="60" step="1"></div>
+          <div style="flex:1;min-width:140px"><label class="f" for="sFuMax">Max follow-ups per store</label><select id="sFuMax"><option value="0">0 (off)</option><option>1</option><option>2</option></select></div>
+        </div>
+        <div class="hint">Stores you emailed that aren't marked "Replied" show up in the <b>Follow-up due</b> tab once this many days pass. When someone replies, paste their email in Lookup and click <b>Mark replied</b>.</div>
+
+        <h3 class="ptitle" style="margin-top:24px">Sent history</h3>
+        <div class="hint" id="histInfo"></div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn sm" id="histExport" type="button">Export history</button>
+          <label class="btn sm" style="cursor:pointer"><input type="file" id="histImport" accept=".json" hidden> Import history</label>
+          <button class="btn sm danger" id="histClear" type="button">Clear history</button>
+        </div>
+        <div class="hint">History remembers every store you've emailed, even after "Clear all". It warns you before emailing the same store twice. Export it to move to another computer or browser.</div>
 
         <h3 class="ptitle" style="margin-top:24px">Engine</h3>
         <label class="f" for="sConc">Stores analyzed at once</label>
@@ -448,6 +477,8 @@ const DEFAULTS = {
   senders: [],
   cap: 50,
   lock: 1.5,
+  fuDays: 3,
+  fuMax: 2,
   concurrency: 4,
   psiKey: '',
   disabledServices: [],
@@ -700,40 +731,84 @@ function bumpSender(sender) {
 }
 function sentToday() { return Object.values(senderCounts()).reduce((a, b) => a + b, 0); }
 
+/* ======================= Sent history (permanent — survives "Clear all") ======================= */
+const rootDomainH = (h) => String(h || '').toLowerCase().replace(/^www\./, '');
+let history = {}; // domain -> { at, email, from, service, store, n, replied, repliedAt }
+let histT = null;
+function saveHistory() { clearTimeout(histT); histT = setTimeout(() => idbSet('history', history), 300); }
+function recordHistory(l, extra = {}) {
+  const k = rootDomainH(l.domain);
+  const h = history[k] || { n: 0 };
+  history[k] = { ...h, at: new Date().toISOString(), email: l.email, from: l.sentFrom || '', service: l.service || '', store: l.a?.storeName || l.domain, n: (h.n || 0) + 1, ...extra };
+  saveHistory();
+}
+function setReplied(l, val) {
+  l.replied = !!val; l.repliedAt = val ? new Date().toISOString() : null;
+  const k = rootDomainH(l.domain);
+  if (history[k]) { history[k].replied = !!val; history[k].repliedAt = l.repliedAt; saveHistory(); }
+}
+const fmtShort = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '');
+
+/* ======================= Follow-ups ======================= */
+function lastContact(l) { const f = l.followups || []; return f.length ? f[f.length - 1].at : l.sentAt; }
+function fuStage(l) { return (l.followups || []).length + 1; }
+function dueFollowups() {
+  const days = Math.max(0, +settings.fuDays || 0), max = Math.max(0, +settings.fuMax || 0), now = Date.now();
+  if (!max) return [];
+  return leads
+    .filter((l) => l.sent && l.email && l.a?.ok && !l.replied && !l.fuStop && (l.followups || []).length < max && lastContact(l) && now - new Date(lastContact(l)).getTime() >= days * 864e5)
+    .sort((x, y) => new Date(lastContact(x)) - new Date(lastContact(y)));
+}
+function followupFor(l) {
+  return Pitches.composeFollowup(l.a, { email: l.email, issueKey: l.issueKey, subject: l.subject, stage: fuStage(l) }, settings);
+}
+
 /* ======================= Sending ======================= */
-function sendLink(l, sender) {
-  const to = encodeURIComponent(l.email);
-  const su = encodeURIComponent(l.subject);
-  const body = encodeURIComponent(l.body);
+function sendLink(email, msg, sender) {
+  const to = encodeURIComponent(email);
+  const su = encodeURIComponent(msg.subject);
+  const body = encodeURIComponent(msg.body);
   if (settings.mode === 'gmail') {
     const au = sender ? `&authuser=${encodeURIComponent(sender)}` : '';
     return `https://mail.google.com/mail/?view=cm&fs=1${au}&to=${to}&su=${su}&body=${body}`;
   }
-  return `mailto:${l.email}?subject=${su}&body=${body}`;
+  return `mailto:${email}?subject=${su}&body=${body}`;
 }
-function sendLead(l) {
+function sendLead(l, opts = {}) {
   if (!l || !l.email) return toast('No email for this store');
   const { sender, capped } = pickSender();
   if (capped) { Sfx.play('cap'); return toast(`All accounts hit today's cap (${settings.cap})`); }
+  const fu = opts.followup ? followupFor(l) : null;
+  const msg = fu || { subject: l.subject, body: l.body };
+  // When sending a follow-up from the default mail app, use the account the first email went from if possible
+  const from = fu && l.sentFrom ? l.sentFrom : sender;
   Sfx.play('send');
-  const href = sendLink(l, sender);
+  const href = sendLink(l.email, msg, from);
   if (settings.mode === 'gmail') window.open(href, '_blank', 'noopener');
   else window.location.href = href;
-  l.sent = true; l.sentAt = new Date().toISOString(); l.sentFrom = sender || '';
-  bumpSender(sender);
+  if (fu) {
+    l.followups = [...(l.followups || []), { at: new Date().toISOString(), from: from || '', stage: fu.stage }];
+    recordHistory(l, { lastFollowup: new Date().toISOString(), followups: l.followups.length });
+  } else {
+    l.sent = true; l.sentAt = new Date().toISOString(); l.sentFrom = from || '';
+    recordHistory(l);
+  }
+  bumpSender(from);
   save(); refreshStats(); renderList();
-  toast(sender ? `Opened · send from ${sender}` : 'Opened in your mail app');
+  toast(`${fu ? `Follow-up ${fu.stage} opened` : 'Opened'}${from ? ` · send from ${from}` : ' in your mail app'}`);
 }
-function readyLeads() { return leads.filter((l) => l.status === 'done' && l.email && !l.sent && !l.skipped); }
+function readyLeads() { return leads.filter((l) => l.status === 'done' && l.email && !l.sent && !l.skipped && !l.replied); }
 
 /* ======================= Rendering ======================= */
+const hasSocials = (l) => l.a?.socials && Object.keys(l.a.socials).length > 0;
 function counts() {
-  const c = { total: leads.length, done: 0, email: 0, noemail: 0, failed: 0, ready: 0, hot: 0, sent: 0 };
+  const c = { total: leads.length, done: 0, email: 0, noemail: 0, failed: 0, ready: 0, hot: 0, sent: 0, replied: 0, socials: 0, followup: dueFollowups().length };
   leads.forEach((l) => {
-    if (l.status === 'done') { c.done++; if (l.email) c.email++; else c.noemail++; }
+    if (l.status === 'done') { c.done++; if (l.email) c.email++; else { c.noemail++; if (hasSocials(l)) c.socials++; } }
     if (l.status === 'failed') c.failed++;
     if (l.sent) c.sent++;
-    if (l.status === 'done' && l.email && !l.sent && !l.skipped) { c.ready++; if (priorityOf(l) === 'hot') c.hot++; }
+    if (l.replied) c.replied++;
+    if (l.status === 'done' && l.email && !l.sent && !l.skipped && !l.replied) { c.ready++; if (priorityOf(l) === 'hot') c.hot++; }
   });
   return c;
 }
@@ -747,41 +822,63 @@ function refreshStats() {
   $('#gFail').textContent = c.failed;
   $('#gFill').style.width = (c.total ? (processed / c.total) * 100 : 0) + '%';
   $('#cReady').textContent = c.ready; $('#cHot').textContent = c.hot; $('#cSent').textContent = c.sent;
+  $('#cFu').textContent = c.followup; $('#cRep').textContent = c.replied; $('#cSoc').textContent = c.socials;
   $('#cNo').textContent = c.noemail; $('#cFail').textContent = c.failed; $('#cAll').textContent = c.total;
   $('#hReady').textContent = c.ready; $('#hToday').textContent = sentToday();
   $('#tLoad').textContent = c.total ? c.total : '';
-  $('#tSend').textContent = c.ready ? c.ready : '';
+  $('#tSend').textContent = c.ready + c.followup ? c.ready + c.followup : '';
   if (running && !paused) {
     const left = leads.filter((l) => l.status === 'queued' || l.status === 'analyzing').length;
     const rate = doneThisRun / Math.max(1, (Date.now() - startedAt) / 1000);
     $('#eta').textContent = rate > 0 ? `${left} left · ~${Math.ceil(left / rate / 60)} min` : `${left} left`;
   } else if (paused) $('#eta').textContent = 'Paused';
   const { sender, capped } = pickSender();
-  const nxt = readyLeads()[0];
+  const isFu = view.filter === 'followup';
+  const nxt = isFu ? dueFollowups()[0] : readyLeads()[0];
   $('#nextMeta').innerHTML = nxt
-    ? `Next: <b>${esc(nxt.a.storeName)}</b> → ${esc(nxt.email)}${sender ? ` · from <b>${esc(sender)}</b>` : ''}${capped ? ' · <span style="color:var(--hot)">all accounts capped</span>' : ''}`
-    : 'Nothing ready to send yet';
+    ? `Next${isFu ? ' follow-up' : ''}: <b>${esc(nxt.a.storeName)}</b> → ${esc(nxt.email)}${sender ? ` · from <b>${esc(isFu && nxt.sentFrom ? nxt.sentFrom : sender)}</b>` : ''}${capped ? ' · <span style="color:var(--hot)">all accounts capped</span>' : ''}`
+    : isFu ? 'No follow-ups due right now' : 'Nothing ready to send yet';
   updateFixedSend();
 }
 
 function filtered() {
   const q = view.q.toLowerCase();
-  return leads.filter((l) => {
+  const due = view.filter === 'followup' ? new Set(dueFollowups()) : null;
+  const list = leads.filter((l) => {
     switch (view.filter) {
-      case 'ready': if (!(l.status === 'done' && l.email && !l.sent && !l.skipped)) return false; break;
-      case 'hot': if (!(l.status === 'done' && l.email && !l.sent && !l.skipped && priorityOf(l) === 'hot')) return false; break;
+      case 'ready': if (!(l.status === 'done' && l.email && !l.sent && !l.skipped && !l.replied)) return false; break;
+      case 'hot': if (!(l.status === 'done' && l.email && !l.sent && !l.skipped && !l.replied && priorityOf(l) === 'hot')) return false; break;
+      case 'followup': if (!due.has(l)) return false; break;
       case 'sent': if (!l.sent) return false; break;
+      case 'replied': if (!l.replied) return false; break;
+      case 'socials': if (!(l.status === 'done' && !l.email && hasSocials(l))) return false; break;
       case 'noemail': if (!(l.status === 'done' && !l.email)) return false; break;
       case 'failed': if (l.status !== 'failed') return false; break;
     }
     if (view.service && l.service !== view.service) return false;
-    if (q && !(`${l.domain} ${l.email} ${l.a?.storeName || ''}`.toLowerCase().includes(q))) return false;
+    if (q && !(`${l.domain} ${l.email} ${l.a?.storeName || ''} ${l.a?.owner?.full || ''}`.toLowerCase().includes(q))) return false;
     return true;
   });
+  if (due) list.sort((x, y) => new Date(lastContact(x)) - new Date(lastContact(y)));
+  return list;
 }
 
 let listT = null;
 function scheduleListRender() { clearTimeout(listT); listT = setTimeout(renderList, 250); }
+
+const SOCIAL_URL = {
+  instagram: (h) => [`IG @${h}`, `https://instagram.com/${h}`],
+  tiktok: (h) => [`TikTok @${h}`, `https://www.tiktok.com/@${h}`],
+  facebook: (h) => [`FB ${h}`, `https://facebook.com/${h}`],
+  youtube: (h) => [`YouTube ${h}`, `https://youtube.com/${h}`],
+  pinterest: (h) => [`Pinterest ${h}`, `https://pinterest.com/${h}`],
+};
+function socialChips(a) {
+  return Object.entries(a.socials || {})
+    .filter(([k]) => SOCIAL_URL[k])
+    .map(([k, h]) => { const [label, url] = SOCIAL_URL[k](h); return `<a class="tag soc" href="${esc(url)}" target="_blank" rel="noopener">${esc(label)} ↗</a>`; })
+    .join('');
+}
 
 function leadHtml(l, i) {
   const a = l.a;
@@ -796,41 +893,61 @@ function leadHtml(l, i) {
   if (l.status !== 'done') {
     return `<div class="lead" data-id="${l.id}"><div class="num">${i}</div><div><div class="sname">${esc(l.domain)}</div><div class="sdom">${esc(l.status)}…</div></div><div></div><div></div></div>`;
   }
+  const isFu = view.filter === 'followup';
   const pr = priorityOf(l);
   const emails = [...new Set([l.email, ...(a.emails || [])].filter(Boolean))];
   const emailUi = emails.length > 1
     ? `<select class="emailsel" data-a="email">${emails.map((e) => `<option ${e === l.email ? 'selected' : ''}>${esc(e)}</option>`).join('')}</select>`
     : `<input class="emailsel" data-a="emailin" type="email" value="${esc(l.email || '')}" placeholder="Add email manually">`;
-  const words = (l.body || '').split(/\s+/).filter(Boolean).length;
+  const prev = history[rootDomainH(l.domain)];
+  const prevTag = !l.sent && prev ? `<span class="tag warm" title="From your sent history">Emailed before · ${esc(fmtShort(prev.at))}</span>` : '';
+  const fuInfo = (l.followups || []).length ? `<span class="tag">Follow-ups: ${(l.followups || []).length}</span>` : '';
   const issueOpts = (a.issues || []).filter((x) => x.key in Pitches.SERVICE_OF).map((x) => `<option value="${x.key}" ${x.key === l.issueKey ? 'selected' : ''}>${esc(Pitches.SERVICE_OF[x.key])} (${x.severity})</option>`).join('');
-  return `<div class="lead ${l.sent ? 'sent' : ''} ${l.skipped ? 'skipped' : ''}" data-id="${l.id}">
+  const fu = isFu ? followupFor(l) : null;
+  const subj = fu ? fu.subject : l.subject;
+  const body = fu ? fu.body : l.body;
+  const words = (body || '').split(/\s+/).filter(Boolean).length;
+  const cls = isFu ? '' : `${l.sent ? 'sent' : ''} ${l.skipped ? 'skipped' : ''} ${l.replied ? 'replied' : ''}`;
+  return `<div class="lead ${cls}" data-id="${l.id}">
     <div class="num">${i}</div>
     <div>
       <div class="sname">${esc(a.storeName)}</div>
       <div class="sdom"><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.domain)} ↗</a></div>
+      ${a.owner ? `<div class="owner" title="Found on: ${esc(a.owner.source)}">Owner: <b>${esc(a.owner.full)}</b></div>` : ''}
       <div class="tags">
-        <span class="tag ${pr}">${pr.toUpperCase()}</span>
+        ${isFu ? `<span class="tag hot">FOLLOW-UP ${fuStage(l)}</span>` : `<span class="tag ${pr}">${pr.toUpperCase()}</span>`}
         <span class="tag svc">${esc(l.service)}</span>
         <span class="tag">Traffic: ${esc(a.traffic.tier)}</span>
         <span class="tag">${esc(a.niche)}</span>
         ${a.country ? `<span class="tag">${esc(a.country)}</span>` : ''}
+        ${prevTag}${fuInfo}
+        ${l.replied ? '<span class="tag" style="color:var(--ok);border-color:rgba(43,227,139,.4)">Replied ✓</span>' : ''}
       </div>
+      ${hasSocials(l) ? `<div class="tags">${socialChips(a)}</div>` : ''}
       ${emailUi}
     </div>
     <div class="msg">
       <div class="view-mode">
-        <div class="subj"><span>SUBJ</span>${esc(l.subject)}</div>
-        <div class="body" data-a="expand">${esc(l.body)}</div>
-        <div class="wc">${words} words${l.edited ? ' · edited' : ''}${l.sentFrom ? ' · sent from ' + esc(l.sentFrom) : ''}</div>
+        ${isFu ? `<div class="hint" style="margin-bottom:4px">First email sent ${esc(fmtShort(l.sentAt))}${(l.followups || []).length ? ` · last follow-up ${esc(fmtShort(lastContact(l)))}` : ''}${l.sentFrom ? ` · from ${esc(l.sentFrom)}` : ''}</div>` : ''}
+        <div class="subj"><span>SUBJ</span>${esc(subj)}</div>
+        <div class="body" data-a="expand">${esc(body)}</div>
+        <div class="wc">${words} words${!isFu && l.edited ? ' · edited' : ''}${!isFu && l.sentFrom ? ' · sent from ' + esc(l.sentFrom) : ''}</div>
       </div>
     </div>
     <div class="acts">
-      <button class="btn go sm" data-a="send" ${l.email ? '' : 'disabled'}>${l.sent ? 'Send again' : '⚡ Send'}</button>
-      <button class="btn sm" data-a="edit">Edit</button>
-      <button class="btn sm" data-a="details">Analysis</button>
-      <select class="btn sm" data-a="issue" title="Pitch a different problem">${issueOpts || '<option>UGC videos</option>'}</select>
-      <button class="btn sm" data-a="variant" ${l.variants > 1 ? '' : 'disabled'}>Rewrite</button>
-      <button class="btn sm" data-a="${l.sent ? 'unsend' : l.skipped ? 'unskip' : 'skip'}">${l.sent ? 'Mark unsent' : l.skipped ? 'Unskip' : 'Skip'}</button>
+      ${isFu
+        ? `<button class="btn go sm" data-a="sendfu">⚡ Send follow-up</button>
+           <button class="btn sm" data-a="replied">Mark replied</button>
+           <button class="btn sm" data-a="details">Analysis</button>
+           <button class="btn sm" data-a="fustop">Stop follow-ups</button>`
+        : `<button class="btn go sm" data-a="send" ${l.email ? '' : 'disabled'}>${l.sent ? 'Send again' : '⚡ Send'}</button>
+           <button class="btn sm" data-a="edit">Edit</button>
+           <button class="btn sm" data-a="details">Analysis</button>
+           <select class="btn sm" data-a="issue" title="Pitch a different problem">${issueOpts || '<option>UGC videos</option>'}</select>
+           <button class="btn sm" data-a="variant" ${l.variants > 1 ? '' : 'disabled'}>Rewrite</button>
+           ${l.sent
+             ? `<button class="btn sm" data-a="${l.replied ? 'unreplied' : 'replied'}">${l.replied ? 'Unmark replied' : 'Mark replied'}</button>`
+             : `<button class="btn sm" data-a="${l.skipped ? 'unskip' : 'skip'}">${l.skipped ? 'Unskip' : 'Skip'}</button>`}`}
     </div>
   </div>`;
 }
@@ -870,7 +987,7 @@ function showDetails(l) {
     <button class="btn sm mclose" data-a="close">Close ✕</button>
     <div class="mhead row" style="gap:14px;align-items:center">
       ${bs?.image ? `<img class="thumb" src="${esc(bs.image)}" alt="" loading="lazy">` : ''}
-      <div><h2>${esc(a.storeName)}</h2><div class="sdom"><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.domain)} ↗</a> · ${esc(a.niche)}${a.country ? ' · ' + esc(a.country) : ''}${a.currency ? ' · ' + esc(a.currency) : ''}</div></div>
+      <div><h2>${esc(a.storeName)}</h2>${a.owner ? `<div class="owner">Owner: <b>${esc(a.owner.full)}</b> · found on ${esc(a.owner.source)}</div>` : ''}<div class="sdom"><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.domain)} ↗</a> · ${esc(a.niche)}${a.country ? ' · ' + esc(a.country) : ''}${a.currency ? ' · ' + esc(a.currency) : ''}</div></div>
     </div>
     <div class="kpis">
       <div class="kpi"><b style="color:${sp.score < 50 ? 'var(--hot)' : sp.score < 70 ? 'var(--warm)' : 'var(--ok)'}">${sp.score}</b><small>Mobile speed ${sp.source === 'google' ? '(Google)' : '(est.)'}</small></div>
@@ -915,7 +1032,7 @@ function switchView(v) {
   $$('.view').forEach((x) => x.classList.toggle('on', x.id === 'v-' + v));
   $('#fixedSend').classList.toggle('on', v === 'send');
   document.body.classList.toggle('sending', v === 'send');
-  if (v === 'send') renderList();
+  if (v === 'send') { renderList(); refreshStats(); }
   if (v === 'settings') fillSettings();
   window.scrollTo({ top: 0 });
 }
@@ -928,20 +1045,51 @@ $('#csvFile').addEventListener('change', async (e) => {
   e.target.value = '';
 });
 
-$('#addRun').addEventListener('click', () => {
+function askDupes(dupes) {
+  return new Promise((resolve) => {
+    dupeResolve = resolve;
+    const rows = dupes.slice(0, 300).map((p) => {
+      const h = history[rootDomainH(p.domain)];
+      return `<div><b>${esc(h?.store || p.domain)}</b><span>${esc(p.domain)} · ${esc(fmtShort(h?.at))}${h?.replied ? ' · replied' : ''}</span></div>`;
+    }).join('');
+    $('#mbox').innerHTML = `
+      <div class="mhead"><h2>${dupes.length} ${dupes.length === 1 ? 'store was' : 'stores were'} already emailed</h2></div>
+      <p class="hint" style="font-size:14px">These are in your sent history from earlier uploads. Emailing them again with the same kind of pitch can annoy owners and hurt your accounts.</p>
+      <div class="dupe-list">${rows}${dupes.length > 300 ? `<div><span>…and ${dupes.length - 300} more</span></div>` : ''}</div>
+      <div class="row">
+        <button class="btn go" data-dupe="skip" type="button">Skip them (recommended)</button>
+        <button class="btn" data-dupe="add" type="button">Add them anyway</button>
+      </div>`;
+    $('#mbox').dataset.id = '';
+    $('#modal').classList.add('on');
+  });
+}
+
+$('#addRun').addEventListener('click', async () => {
   const parsed = parseInput($('#links').value);
   if (!parsed.length) return toast('Paste at least one store link');
   const have = new Set(leads.map((l) => l.domain));
-  let added = 0;
+  const fresh = [];
+  let inList = 0;
   parsed.forEach((p) => {
-    if (have.has(p.domain)) return;
+    if (have.has(p.domain)) { inList++; return; }
     have.add(p.domain);
-    leads.push({ id: uid(), domain: p.domain, email: p.email || '', manualEmail: !!p.email, status: 'queued', addedAt: Date.now() });
-    added++;
+    fresh.push(p);
   });
+  const dupes = fresh.filter((p) => history[rootDomainH(p.domain)]);
+  let skippedHist = 0;
+  let toAdd = fresh;
+  if (dupes.length) {
+    const choice = await askDupes(dupes);
+    if (choice !== 'add') { const d = new Set(dupes.map((p) => p.domain)); toAdd = fresh.filter((p) => !d.has(p.domain)); skippedHist = dupes.length; }
+  }
+  toAdd.forEach((p) => leads.push({ id: uid(), domain: p.domain, email: p.email || '', manualEmail: !!p.email, status: 'queued', addedAt: Date.now() }));
   $('#links').value = '';
-  $('#parseInfo').textContent = `Added ${added} new stores${parsed.length - added ? ` · ${parsed.length - added} duplicates skipped` : ''}`;
-  logLine(`Queued ${added} stores`, 'info');
+  const bits = [`Added ${toAdd.length} new stores`];
+  if (inList) bits.push(`${inList} already in your list`);
+  if (skippedHist) bits.push(`${skippedHist} already emailed before (skipped)`);
+  $('#parseInfo').textContent = bits.join(' · ');
+  logLine(`Queued ${toAdd.length} stores${skippedHist ? ` · skipped ${skippedHist} already emailed` : ''}`, 'info');
   save(); startEngine();
 });
 $('#pauseBtn').addEventListener('click', () => {
@@ -957,7 +1105,7 @@ $('#retryBtn').addEventListener('click', () => {
   logLine(`Retrying ${n} failed stores`, 'info'); save(); startEngine();
 });
 $('#clearAll').addEventListener('click', () => {
-  if (!confirm('Remove ALL stores, analyses and send history from this browser?')) return;
+  if (!confirm('Remove all stores and analyses from this list? Your sent history is kept, so NitroSend still warns you before emailing the same stores again.')) return;
   leads = []; running = false; paused = false; save(); refreshStats(); renderList();
   $('#log').innerHTML = ''; toast('Cleared');
 });
@@ -966,7 +1114,7 @@ $('#fChips').addEventListener('click', (e) => {
   const b = e.target.closest('.chip'); if (!b) return;
   view.filter = b.dataset.f; view.page = 0;
   $$('#fChips .chip').forEach((c) => c.classList.toggle('on', c === b));
-  renderList(); updateFixedSend();
+  renderList(); refreshStats();
 });
 $('#fService').addEventListener('change', (e) => { view.service = e.target.value; view.page = 0; renderList(); });
 $('#fSearch').addEventListener('input', (e) => { view.q = e.target.value; view.page = 0; scheduleListRender(); });
@@ -988,6 +1136,10 @@ $('#list').addEventListener('click', (e) => {
   else if (act === 'skip') { l.skipped = true; save(); refreshStats(); renderList(); }
   else if (act === 'unskip') { l.skipped = false; save(); refreshStats(); renderList(); }
   else if (act === 'unsend') { l.sent = false; l.sentFrom = ''; save(); refreshStats(); renderList(); }
+  else if (act === 'sendfu') sendLead(l, { followup: true });
+  else if (act === 'replied') { setReplied(l, true); save(); refreshStats(); renderList(); toast(`${l.a?.storeName || l.domain} marked as replied`); }
+  else if (act === 'unreplied') { setReplied(l, false); save(); refreshStats(); renderList(); }
+  else if (act === 'fustop') { l.fuStop = true; save(); refreshStats(); renderList(); toast('No more follow-ups for this store'); }
   else if (act === 'retry') { l.status = 'queued'; save(); startEngine(); renderList(); }
   else if (act === 'remove') { leads = leads.filter((x) => x !== l); save(); refreshStats(); renderList(); }
   else if (act === 'edit') {
@@ -1008,8 +1160,15 @@ $('#list').addEventListener('change', (e) => {
   if (el.dataset.a === 'issue') { l.issueKey = el.value; l.variant = 0; composeLead(l, true); save(); renderList(); }
 });
 
+let dupeResolve = null;
+function closeModal() {
+  $('#modal').classList.remove('on');
+  if (dupeResolve) { const r = dupeResolve; dupeResolve = null; r('skip'); }
+}
 $('#modal').addEventListener('click', (e) => {
-  if (e.target.id === 'modal' || e.target.closest('[data-a="close"]')) return $('#modal').classList.remove('on');
+  const dz = e.target.closest('[data-dupe]');
+  if (dz && dupeResolve) { const r = dupeResolve; dupeResolve = null; $('#modal').classList.remove('on'); return r(dz.dataset.dupe); }
+  if (e.target.id === 'modal' || e.target.closest('[data-a="close"]')) return closeModal();
   const b = e.target.closest('[data-a="pitch"]');
   if (b) {
     const l = byId($('#mbox').dataset.id); if (!l) return;
@@ -1018,7 +1177,7 @@ $('#modal').addEventListener('click', (e) => {
   }
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') $('#modal').classList.remove('on');
+  if (e.key === 'Escape') closeModal();
   if ((e.key === 'n' || e.key === 'N') && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && $('#v-send').classList.contains('on')) {
     e.preventDefault(); $('#fixedSend').click();
   }
@@ -1027,35 +1186,37 @@ document.addEventListener('keydown', (e) => {
 /* Fixed SEND button — same spot every time, with a lock against double clicks */
 let sendLockedUntil = 0;
 function nextPool() {
+  if (view.filter === 'followup') return dueFollowups();
   return view.filter === 'hot' ? readyLeads().filter((l) => priorityOf(l) === 'hot') : readyLeads();
 }
 function updateFixedSend() {
   const b = $('#fixedSend');
   const sub = $('#fixedSendSub');
+  const isFu = view.filter === 'followup';
   const locked = Date.now() < sendLockedUntil;
   const next = nextPool()[0];
   const { capped } = pickSender();
   b.classList.toggle('wait', locked);
   b.classList.toggle('done', !next || capped);
-  b.firstChild.nodeValue = !next ? 'Done ✓' : capped ? 'Cap reached' : locked ? 'Wait…' : '⚡ Send';
-  sub.textContent = !next ? 'Nothing left to send' : capped ? 'All accounts hit today’s cap' : `${next.a.storeName} → ${next.email}`;
+  b.firstChild.nodeValue = !next ? 'Done ✓' : capped ? 'Cap reached' : locked ? 'Wait…' : isFu ? '⚡ Follow up' : '⚡ Send';
+  sub.textContent = !next ? (isFu ? 'No follow-ups due' : 'Nothing left to send') : capped ? 'All accounts hit today’s cap' : `${isFu ? `#${fuStage(next)} · ` : ''}${next.a.storeName} → ${next.email}`;
 }
 $('#fixedSend').addEventListener('click', () => {
   if (Date.now() < sendLockedUntil) return;
   const l = nextPool()[0];
   if (!l) { updateFixedSend(); return; }
   sendLockedUntil = Date.now() + (settings.lock || 0) * 1000;
-  sendLead(l);
+  sendLead(l, { followup: view.filter === 'followup' });
   updateFixedSend();
   if (settings.lock) setTimeout(updateFixedSend, settings.lock * 1000 + 30);
 });
 
 $('#exportCsv').addEventListener('click', () => {
-  const cols = ['domain', 'store', 'email', 'all_emails', 'service', 'priority', 'subject', 'body', 'sent', 'sent_from', 'sent_at', 'traffic', 'speed_score', 'design_score', 'niche', 'country', 'bestseller', 'status', 'error'];
+  const cols = ['domain', 'store', 'owner', 'email', 'all_emails', 'instagram', 'tiktok', 'facebook', 'service', 'priority', 'subject', 'body', 'sent', 'sent_from', 'sent_at', 'followups', 'replied', 'traffic', 'speed_score', 'design_score', 'niche', 'country', 'bestseller', 'status', 'error'];
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const rows = leads.map((l) => [
-    l.domain, l.a?.storeName, l.email, (l.a?.emails || []).join(' '), l.service, l.a?.ok ? priorityOf(l) : '', l.subject, l.body,
-    l.sent ? 'yes' : '', l.sentFrom, l.sentAt, l.a?.traffic?.tier, l.a?.speed?.score, l.a?.design?.score, l.a?.niche, l.a?.country, l.a?.bestseller?.title, l.status, l.error,
+    l.domain, l.a?.storeName, l.a?.owner?.full, l.email, (l.a?.emails || []).join(' '), l.a?.socials?.instagram, l.a?.socials?.tiktok, l.a?.socials?.facebook, l.service, l.a?.ok ? priorityOf(l) : '', l.subject, l.body,
+    l.sent ? 'yes' : '', l.sentFrom, l.sentAt, (l.followups || []).length || '', l.replied ? 'yes' : '', l.a?.traffic?.tier, l.a?.speed?.score, l.a?.design?.score, l.a?.niche, l.a?.country, l.a?.bestseller?.title, l.status, l.error,
   ].map(q).join(','));
   const blob = new Blob([cols.join(',') + '\n' + rows.join('\n')], { type: 'text/csv' });
   const a = document.createElement('a');
@@ -1085,6 +1246,10 @@ function lookupEmail(raw) {
     });
     if (hits.length) return { q: email, kind: 'domain', hits };
   }
+  // 3) sent history (stores emailed in earlier lists, even after "Clear all")
+  const hk = Object.keys(history).find((k) => history[k].email === email) ||
+    (!FREE_MAIL.test(dom) && Object.keys(history).find((k) => k === dom || k.endsWith('.' + dom) || dom.endsWith('.' + k)));
+  if (hk) return { q: email, kind: 'history', key: hk, h: history[hk] };
   return { q: email, kind: 'miss', hits: [], free: FREE_MAIL.test(dom) };
 }
 
@@ -1100,12 +1265,32 @@ function lookupCard(r) {
     return `<div class="lk-res miss"><div class="lk-q">${esc(r.q)}</div><div class="lk-store">Not in your NitroSend list</div>
       <div class="hint">${r.free ? 'This is a personal email (Gmail, Yahoo, etc.), and it isn’t saved on any of your stores.' : 'No store you’ve uploaded has this email or domain.'}</div></div>`;
   }
+  if (r.kind === 'history') {
+    const h = r.h;
+    return `<div class="lk-res domain" data-hist="${esc(r.key)}">
+      <div class="lk-q">${esc(r.q)} · found in your sent history</div>
+      <div class="lk-store">${esc(h.store || r.key)}<a href="https://${esc(r.key)}" target="_blank" rel="noopener">${esc(r.key)} ↗</a></div>
+      <div class="lk-grid">
+        <div><span>Status</span>${h.replied ? '<b style="color:var(--ok)">Replied</b>' : '<b style="color:var(--ok)">Sent</b>'} ${esc(fmtDate(h.at))}</div>
+        <div><span>Sent from</span>${esc(h.from || 'Default mail app')}</div>
+        <div><span>Emailed to</span>${esc(h.email || '—')}</div>
+        <div><span>Pitched</span>${esc(h.service || '—')}</div>
+      </div>
+      <div class="hint" style="margin-top:8px">This store is no longer in your current list (it was cleared), so the full email and analysis aren't available.</div>
+      <div class="lk-acts">
+        <button class="btn sm" data-lk="${h.replied ? 'hunreplied' : 'hreplied'}" type="button">${h.replied ? 'Unmark replied' : 'Mark replied'}</button>
+        <button class="btn sm" data-lk="hcopy" type="button">Copy URL</button>
+      </div>
+    </div>`;
+  }
   return r.hits.map((l) => {
     const a = l.a || {};
     const name = a.storeName || l.domain;
     const url = a.url || `https://${l.domain}`;
-    const status = l.sent
-      ? `<b style="color:var(--ok)">Sent</b> ${esc(fmtDate(l.sentAt))}`
+    const status = l.replied
+      ? `<b style="color:var(--ok)">Replied</b> ${esc(fmtDate(l.repliedAt))}`
+      : l.sent
+      ? `<b style="color:var(--ok)">Sent</b> ${esc(fmtDate(l.sentAt))}${(l.followups || []).length ? ` · ${(l.followups || []).length} follow-up(s)` : ''}`
       : l.skipped ? '<b style="color:var(--dim)">Skipped</b>'
       : l.status === 'failed' ? '<b style="color:var(--hot)">Analysis failed</b>'
       : l.status === 'done' ? (l.email ? '<b style="color:var(--warm)">Not sent yet</b>' : '<b style="color:var(--warm)">No email</b>')
@@ -1122,9 +1307,11 @@ function lookupCard(r) {
         <div><span>Pitched</span>${esc(l.service || '—')}</div>
         ${a.niche ? `<div><span>Niche</span>${esc(a.niche)}</div>` : ''}
         ${a.country ? `<div><span>Country</span>${esc(a.country)}</div>` : ''}
+        ${a.owner ? `<div><span>Owner</span>${esc(a.owner.full)}</div>` : ''}
       </div>
       ${l.subject ? `<details><summary>${l.sent ? 'Show the email you sent' : 'Show the email (not sent yet)'}</summary><pre><b>Subject:</b> ${esc(l.subject)}\n\n${esc(l.body)}</pre></details>` : ''}
       <div class="lk-acts">
+        ${l.sent ? `<button class="btn ${l.replied ? '' : 'go '}sm" data-lk="${l.replied ? 'unreplied' : 'replied'}" type="button">${l.replied ? 'Unmark replied' : 'Mark replied'}</button>` : ''}
         ${a.ok ? '<button class="btn sm" data-lk="analysis" type="button">Analysis</button>' : ''}
         <button class="btn sm" data-lk="show" type="button">Show in list</button>
         <button class="btn sm" data-lk="copy" type="button">Copy URL</button>
@@ -1136,9 +1323,14 @@ function lookupCard(r) {
 function runLookup() {
   const lines = $('#lkIn').value.split(/[\n,;\s]+/).map((s) => s.trim()).filter(Boolean);
   if (!lines.length) { $('#lkOut').innerHTML = ''; return; }
-  if (!leads.length) { $('#lkOut').innerHTML = '<div class="lk-res miss"><div class="lk-store">No stores saved yet</div><div class="hint">Upload store links in the Load tab first.</div></div>'; return; }
+  if (!leads.length && !Object.keys(history).length) { $('#lkOut').innerHTML = '<div class="lk-res miss"><div class="lk-store">No stores saved yet</div><div class="hint">Upload store links in the Load tab first.</div></div>'; return; }
   const seen = new Set();
-  $('#lkOut').innerHTML = lines.filter((x) => !seen.has(x.toLowerCase()) && seen.add(x.toLowerCase())).slice(0, 50).map((x) => lookupCard(lookupEmail(x))).join('');
+  const results = lines.filter((x) => !seen.has(x.toLowerCase()) && seen.add(x.toLowerCase())).slice(0, 200).map(lookupEmail);
+  const markable = results.flatMap((r) => (r.hits || []).filter((l) => l.sent && !l.replied).map((l) => 'L:' + l.id).concat(r.kind === 'history' && !r.h.replied ? ['H:' + r.key] : []));
+  const head = results.length > 1 && markable.length
+    ? `<div class="row" style="margin-top:10px"><button class="btn go sm" data-lk="markall" data-ids="${esc([...new Set(markable)].join(','))}" type="button">Mark all ${new Set(markable).size} found as replied</button><span class="hint">${results.filter((r) => r.kind !== 'miss' && r.kind !== 'invalid').length} of ${results.length} emails found</span></div>`
+    : '';
+  $('#lkOut').innerHTML = head + results.map(lookupCard).join('');
 }
 
 $('#lkBtn').addEventListener('click', runLookup);
@@ -1149,7 +1341,31 @@ $('#lkIn').addEventListener('paste', () => setTimeout(runLookup, 0));
 $('#lkClear').addEventListener('click', () => { $('#lkIn').value = ''; $('#lkOut').innerHTML = ''; $('#lkIn').focus(); });
 $('#lkOut').addEventListener('click', async (e) => {
   const b = e.target.closest('[data-lk]'); if (!b) return;
+  const act = b.dataset.lk;
+  if (act === 'markall') {
+    let n = 0;
+    b.dataset.ids.split(',').forEach((x) => {
+      if (x.startsWith('L:')) { const l = byId(x.slice(2)); if (l) { setReplied(l, true); n++; } }
+      else if (x.startsWith('H:')) { const k = x.slice(2); if (history[k]) { history[k].replied = true; history[k].repliedAt = new Date().toISOString(); n++; } }
+    });
+    saveHistory(); save(); refreshStats(); renderList(); runLookup();
+    return toast(`${n} marked as replied. They won't get follow-ups.`);
+  }
+  const hk = b.closest('.lk-res').dataset.hist;
+  if (hk && history[hk]) {
+    if (act === 'hreplied' || act === 'hunreplied') {
+      history[hk].replied = act === 'hreplied'; history[hk].repliedAt = act === 'hreplied' ? new Date().toISOString() : null;
+      saveHistory(); runLookup(); toast(act === 'hreplied' ? 'Marked as replied' : 'Unmarked');
+    } else if (act === 'hcopy') {
+      try { await navigator.clipboard.writeText('https://' + hk); toast('URL copied'); } catch { prompt('Copy this URL:', 'https://' + hk); }
+    }
+    return;
+  }
   const l = byId(b.closest('.lk-res').dataset.id); if (!l) return;
+  if (act === 'replied' || act === 'unreplied') {
+    setReplied(l, act === 'replied'); save(); refreshStats(); renderList(); runLookup();
+    return toast(act === 'replied' ? `${l.a?.storeName || l.domain} marked as replied. No follow-ups will be sent.` : 'Unmarked');
+  }
   if (b.dataset.lk === 'analysis') showDetails(l);
   else if (b.dataset.lk === 'copy') {
     const url = l.a?.url || `https://${l.domain}`;
@@ -1176,6 +1392,10 @@ function fillSettings() {
   $('#sSenders').value = (settings.senders || []).join('\n');
   $('#sCap').value = settings.cap;
   $('#sLock').value = settings.lock;
+  $('#sFuDays').value = settings.fuDays;
+  $('#sFuMax').value = String(settings.fuMax);
+  const hn = Object.keys(history).length;
+  $('#histInfo').textContent = hn ? `${hn} store${hn === 1 ? '' : 's'} in your sent history · ${Object.values(history).filter((h) => h.replied).length} replied` : 'No stores in your sent history yet.';
   $('#sConc').value = String(settings.concurrency);
   $('#sPsi').value = settings.psiKey;
   const off = new Set(settings.disabledServices || []);
@@ -1197,6 +1417,9 @@ function readSettings() {
   settings.mode = $('#sMode').value;
   settings.senders = $('#sSenders').value.split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter((s) => EMAIL_RE.test(s));
   settings.cap = Math.max(1, parseInt($('#sCap').value, 10) || DEFAULTS.cap);
+  settings.fuDays = Math.max(1, parseInt($('#sFuDays').value, 10) || DEFAULTS.fuDays);
+  settings.fuMax = Math.max(0, Math.min(2, parseInt($('#sFuMax').value, 10)));
+  if (isNaN(settings.fuMax)) settings.fuMax = DEFAULTS.fuMax;
   settings.lock = Math.max(0, parseFloat($('#sLock').value));
   if (isNaN(settings.lock)) settings.lock = DEFAULTS.lock;
   settings.concurrency = parseInt($('#sConc').value, 10) || 4;
@@ -1210,6 +1433,31 @@ $('#saveSettings').addEventListener('click', () => {
   // re-pick angle for unedited, unsent leads when services change
   leads.forEach((l) => { if (!l.edited && !l.sent) { l.issueKey = null; l.variant = undefined; composeLead(l, true); } });
   save(); fillSettings(); refreshStats(); toast('Settings saved');
+});
+$('#histExport').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify({ app: 'nitrosend', type: 'history', exportedAt: new Date().toISOString(), history }, null, 1)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = `nitrosend-history-${today()}.json`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
+$('#histImport').addEventListener('change', async (e) => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try {
+    const j = JSON.parse(await f.text());
+    const h = j.history || j;
+    let n = 0;
+    Object.entries(h).forEach(([k, v]) => {
+      if (!v || typeof v !== 'object') return;
+      const cur = history[k];
+      if (!cur || new Date(v.at || 0) > new Date(cur.at || 0)) { history[k] = { ...cur, ...v, replied: !!(v.replied || cur?.replied) }; n++; }
+    });
+    saveHistory(); fillSettings(); refreshStats(); renderList();
+    toast(`Imported ${n} stores into your sent history`);
+  } catch { toast('That file is not a NitroSend history export'); }
+});
+$('#histClear').addEventListener('click', () => {
+  if (!confirm('Delete your whole sent history? NitroSend will no longer warn you about stores you already emailed. Export it first if you might need it.')) return;
+  history = {}; saveHistory(); fillSettings(); renderList(); toast('Sent history cleared');
 });
 $('#testSound').addEventListener('click', () => {
   const prev = { sound: settings.sound, volume: settings.volume };
@@ -1229,9 +1477,19 @@ $('#regenAll').addEventListener('click', () => {
   updateSeasonChip();
   $('#concLbl').textContent = settings.concurrency;
   leads = (await idbGet('leads')) || [];
+  history = (await idbGet('history')) || {};
+  // older versions didn't keep history: copy in any stores already sent
+  let migrated = 0;
+  leads.forEach((l) => {
+    const k = rootDomainH(l.domain);
+    if (l.sent && !history[k]) { history[k] = { at: l.sentAt, email: l.email, from: l.sentFrom || '', service: l.service || '', store: l.a?.storeName || l.domain, n: 1, replied: !!l.replied }; migrated++; }
+  });
+  if (migrated) saveHistory();
   // anything mid-analysis when the tab closed goes back in the queue
   leads.forEach((l) => { if (l.status === 'analyzing') l.status = 'queued'; });
   refreshStats(); renderList();
+  // keep "Follow-up due" counts fresh while the tab stays open
+  setInterval(() => { if (!running) refreshStats(); }, 60000);
   if (leads.some((l) => l.status === 'queued')) {
     logLine(`Resuming ${leads.filter((l) => l.status === 'queued').length} queued stores`, 'info');
     startEngine();
