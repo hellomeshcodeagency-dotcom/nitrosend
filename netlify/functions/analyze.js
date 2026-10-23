@@ -270,7 +270,7 @@ function detectNiche(products) {
   });
   const blob = products
     .slice(0, 80)
-    .map((p) => `${p.title} ${p.product_type || ''} ${(p.tags || []).join ? p.tags.join(' ') : p.tags || ''}`)
+    .map((p) => `${p.title} ${p.product_type || ''} ${Array.isArray(p.tags) ? p.tags.join(' ') : p.tags || ''}`)
     .join(' ');
   let best = null;
   let bestCount = 0;
@@ -283,6 +283,35 @@ function detectNiche(products) {
   });
   const topType = Object.entries(types).sort((a, b) => b[1] - a[1])[0];
   return { niche: bestCount >= 2 ? best : topType ? topType[0] : 'General store', topType: topType ? topType[0] : null };
+}
+
+/* ---------- Store names & closed stores ---------- */
+class ClosedError extends Error {}
+
+// Shopify's own "closed / paused / not open yet" pages
+const CLOSED_TITLE = /this store is unavailable|store unavailable|shop is (currently )?unavailable|this shop is unavailable|store (is )?closed|temporarily closed|opening soon|coming soon|under construction|create an ecommerce website and sell online|there'?s nothing here|page not found|^404\b/i;
+const CLOSED_BODY = /this store is unavailable|sorry, this shop is currently unavailable|this shop is unavailable|store is (temporarily )?closed|this store is not (yet )?open|opening soon/i;
+
+// Names that are page titles, not brand names
+const JUNK_NAME = /unavailable|^home( page)?$|^homepage$|^welcome\b|online store|^shop$|^store$|^my store$|^the store$|coming soon|opening soon|password|^index$|\b404\b|not found|^untitled|^shopify\b|^official (site|website|store)$|^collections?$|^products?$|^all products$|^catalog$|^frontpage$/i;
+
+function prettyDomain(host) {
+  const label = String(host || '').toLowerCase().replace(/^www\./, '').replace(/\.myshopify\.com$/, '').split('.')[0] || host;
+  return label.split(/[-_]+/).filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+function goodName(n) {
+  const s = decode(String(n || '')).replace(/\s+/g, ' ').trim();
+  if (!s || s.length < 2 || s.length > 50) return null;
+  if (JUNK_NAME.test(s)) return null;
+  if (!/[a-z]/i.test(s)) return null;
+  return s;
+}
+
+function pickStoreName({ meta, ogName, title, host }) {
+  const fromTitle = String(title || '').split(/\s[|–—:\-]\s|\s[|–—]|[|–—]\s/)[0];
+  const lastTitlePart = String(title || '').split(/\s[|–—\-]\s/).pop();
+  return goodName(meta) || goodName(ogName) || goodName(fromTitle) || goodName(lastTitlePart) || prettyDomain(host);
 }
 
 function cleanTitle(t) {
@@ -364,7 +393,8 @@ async function analyze(base) {
   if (!home.ok && home.status === 0) {
     throw new Error(home.error === 'timeout' ? 'Store timed out' : 'Store unreachable');
   }
-  if (/\/password(\?|$)/.test(home.url)) throw new Error('Store is password protected');
+  if (/\/password(\?|$)/.test(home.url)) throw new ClosedError('Store is password protected (not open yet)');
+  if ([402, 404, 410, 423].includes(home.status)) throw new ClosedError(`Store is closed (Shopify returned ${home.status})`);
 
   const finalHost = (() => {
     try {
@@ -380,6 +410,15 @@ async function analyze(base) {
   const meta = metaRes.ok ? safeJson(metaRes.text) : null;
   const collections = (collRes.ok && safeJson(collRes.text)?.collections) || [];
   const isShopify = lower.includes('cdn.shopify.com') || lower.includes('shopify.theme') || products.length > 0 || !!meta?.myshopify_domain;
+
+  // Closed / paused / not-yet-open stores: don't pitch these
+  {
+    const pageTitle = decode((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '').replace(/\s+/g, ' ').trim();
+    const bodyText = stripTags(html).slice(0, 4000);
+    if (CLOSED_TITLE.test(pageTitle) && products.length === 0) throw new ClosedError(`Store is closed ("${pageTitle.slice(0, 60)}")`);
+    if (CLOSED_BODY.test(bodyText) && products.length === 0 && html.length < 60000) throw new ClosedError('Store is closed (Shopify "unavailable" page)');
+    if (/this store is unavailable|this shop is unavailable/i.test(pageTitle)) throw new ClosedError(`Store is closed ("${pageTitle.slice(0, 60)}")`);
+  }
 
   // Bestseller
   let bestHandle = null;
@@ -422,8 +461,7 @@ async function analyze(base) {
 
   /* ---------- Store facts ---------- */
   const title = decode((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '').replace(/\s+/g, ' ').trim();
-  const storeName =
-    (meta?.name && decode(meta.name)) || metaContent(html, 'property', 'og:site_name') || title.split(/\s[|–—-]\s/)[0].trim() || finalHost;
+  const storeName = pickStoreName({ meta: meta?.name, ogName: metaContent(html, 'property', 'og:site_name'), title, host: finalHost });
   const theme = themeInfo(html);
   const themeKey = (theme?.schema || theme?.name || '').toLowerCase();
   const currency = meta?.currency || (html.match(/Shopify\.currency\s*=\s*\{[^}]*"active"\s*:\s*"([A-Z]{3})"/) || [])[1] || null;
@@ -522,7 +560,7 @@ async function analyze(base) {
     });
     const dominant = Math.max(0, ...Object.values(ratios));
     const prices = products.flatMap((p) => (p.variants || []).map((v) => parseFloat(v.price))).filter((n) => !isNaN(n) && n > 0);
-    const xmasHits = products.filter((p) => /christmas|xmas|holiday|santa|stocking|gift/i.test(`${p.title} ${(p.tags || []).join ? p.tags.join(' ') : ''}`)).length;
+    const xmasHits = products.filter((p) => /christmas|xmas|holiday|santa|stocking|gift/i.test(`${p.title} ${Array.isArray(p.tags) ? p.tags.join(' ') : p.tags || ''}`)).length;
     catalog = {
       scanned: products.length,
       fewPhotosPct: pct(products.filter((p) => (p.images || []).length < 3).length, products.length),
@@ -710,7 +748,7 @@ async function handle(rawUrl) {
   try {
     return { statusCode: 200, body: await analyze(base) };
   } catch (e) {
-    return { statusCode: 200, body: { ok: false, url: base, domain: new URL(base).hostname, error: e.message || 'Analysis failed' } };
+    return { statusCode: 200, body: { ok: false, closed: e instanceof ClosedError, url: base, domain: new URL(base).hostname, error: e.message || 'Analysis failed' } };
   }
 }
 
