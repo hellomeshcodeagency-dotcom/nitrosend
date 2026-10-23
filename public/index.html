@@ -333,6 +333,7 @@ kbd{font:11px var(--mono);border:1px solid var(--line-2);border-bottom-width:2px
         <button class="chip" data-f="replied">Replied<b id="cRep">0</b></button>
         <button class="chip" data-f="socials">No email, has socials<b id="cSoc">0</b></button>
         <button class="chip" data-f="noemail">No email<b id="cNo">0</b></button>
+        <button class="chip" data-f="closed">Closed<b id="cClosed">0</b></button>
         <button class="chip" data-f="failed">Failed<b id="cFail">0</b></button>
         <button class="chip" data-f="all">All<b id="cAll">0</b></button>
       </div>
@@ -651,7 +652,13 @@ async function analyzeLead(l) {
       try { a = await fetchJson(apiUrl(l.domain), 26000); }
       catch (e) { if (attempt) throw e; await new Promise((r) => setTimeout(r, 800)); }
     }
+    if (a && a.closed) {
+      l.status = 'closed'; l.error = a.error || 'Store is closed'; l.a = null;
+      logLine(`⊘ ${l.domain}: ${l.error}`, 'info');
+      return;
+    }
     if (!a || !a.ok) throw new Error(a?.error || 'Analysis failed');
+    a.storeName = Pitches.cleanStoreName(a.storeName, a.domain);
     l.a = a;
     if (!l.email) l.email = a.emails?.[0] || '';
     await runPsi(l);
@@ -802,10 +809,11 @@ function readyLeads() { return leads.filter((l) => l.status === 'done' && l.emai
 /* ======================= Rendering ======================= */
 const hasSocials = (l) => l.a?.socials && Object.keys(l.a.socials).length > 0;
 function counts() {
-  const c = { total: leads.length, done: 0, email: 0, noemail: 0, failed: 0, ready: 0, hot: 0, sent: 0, replied: 0, socials: 0, followup: dueFollowups().length };
+  const c = { total: leads.length, done: 0, email: 0, noemail: 0, failed: 0, ready: 0, hot: 0, sent: 0, replied: 0, socials: 0, closed: 0, followup: dueFollowups().length };
   leads.forEach((l) => {
     if (l.status === 'done') { c.done++; if (l.email) c.email++; else { c.noemail++; if (hasSocials(l)) c.socials++; } }
     if (l.status === 'failed') c.failed++;
+    if (l.status === 'closed') c.closed++;
     if (l.sent) c.sent++;
     if (l.replied) c.replied++;
     if (l.status === 'done' && l.email && !l.sent && !l.skipped && !l.replied) { c.ready++; if (priorityOf(l) === 'hot') c.hot++; }
@@ -823,7 +831,7 @@ function refreshStats() {
   $('#gFill').style.width = (c.total ? (processed / c.total) * 100 : 0) + '%';
   $('#cReady').textContent = c.ready; $('#cHot').textContent = c.hot; $('#cSent').textContent = c.sent;
   $('#cFu').textContent = c.followup; $('#cRep').textContent = c.replied; $('#cSoc').textContent = c.socials;
-  $('#cNo').textContent = c.noemail; $('#cFail').textContent = c.failed; $('#cAll').textContent = c.total;
+  $('#cNo').textContent = c.noemail; $('#cFail').textContent = c.failed; $('#cClosed').textContent = c.closed; $('#cAll').textContent = c.total;
   $('#hReady').textContent = c.ready; $('#hToday').textContent = sentToday();
   $('#tLoad').textContent = c.total ? c.total : '';
   $('#tSend').textContent = c.ready + c.followup ? c.ready + c.followup : '';
@@ -854,6 +862,7 @@ function filtered() {
       case 'socials': if (!(l.status === 'done' && !l.email && hasSocials(l))) return false; break;
       case 'noemail': if (!(l.status === 'done' && !l.email)) return false; break;
       case 'failed': if (l.status !== 'failed') return false; break;
+      case 'closed': if (l.status !== 'closed') return false; break;
     }
     if (view.service && l.service !== view.service) return false;
     if (q && !(`${l.domain} ${l.email} ${l.a?.storeName || ''} ${l.a?.owner?.full || ''}`.toLowerCase().includes(q))) return false;
@@ -882,6 +891,14 @@ function socialChips(a) {
 
 function leadHtml(l, i) {
   const a = l.a;
+  if (l.status === 'closed') {
+    return `<div class="lead" data-id="${l.id}" style="opacity:.75">
+      <div class="num">${i}</div>
+      <div><div class="sname">${esc(Pitches.cleanStoreName('', l.domain))}</div><div class="sdom"><a href="https://${esc(l.domain)}" target="_blank" rel="noopener">${esc(l.domain)} ↗</a></div><div class="tags"><span class="tag" style="color:var(--dim)">CLOSED</span></div></div>
+      <div class="msg"><div class="hint">${esc(l.error || 'Store is closed')}. No email was written, because the store isn't open. If it reopens later, click Re-check.</div></div>
+      <div class="acts"><button class="btn sm" data-a="retry">Re-check</button><button class="btn sm danger" data-a="remove">Remove</button></div>
+    </div>`;
+  }
   if (l.status === 'failed') {
     return `<div class="lead" data-id="${l.id}">
       <div class="num">${i}</div>
@@ -1293,6 +1310,7 @@ function lookupCard(r) {
       ? `<b style="color:var(--ok)">Sent</b> ${esc(fmtDate(l.sentAt))}${(l.followups || []).length ? ` · ${(l.followups || []).length} follow-up(s)` : ''}`
       : l.skipped ? '<b style="color:var(--dim)">Skipped</b>'
       : l.status === 'failed' ? '<b style="color:var(--hot)">Analysis failed</b>'
+      : l.status === 'closed' ? '<b style="color:var(--dim)">Store closed</b>'
       : l.status === 'done' ? (l.email ? '<b style="color:var(--warm)">Not sent yet</b>' : '<b style="color:var(--warm)">No email</b>')
       : `<b>${esc(l.status)}</b>`;
     return `<div class="lk-res ${r.kind === 'domain' ? 'domain' : ''}" data-id="${l.id}">
@@ -1485,6 +1503,20 @@ $('#regenAll').addEventListener('click', () => {
     if (l.sent && !history[k]) { history[k] = { at: l.sentAt, email: l.email, from: l.sentFrom || '', service: l.service || '', store: l.a?.storeName || l.domain, n: 1, replied: !!l.replied }; migrated++; }
   });
   if (migrated) saveHistory();
+  // clean up stores analyzed by older versions: closed stores + page-title names
+  let fixedClosed = 0, fixedNames = 0;
+  leads.forEach((l) => {
+    if (l.status !== 'done' || !l.a) return;
+    if (!l.sent && (Pitches.looksClosed(l.a.storeName) || Pitches.looksClosed(l.a.title))) {
+      l.status = 'closed'; l.error = `Store is closed ("${l.a.storeName}")`; fixedClosed++; return;
+    }
+    const clean = Pitches.cleanStoreName(l.a.storeName, l.a.domain);
+    if (clean !== l.a.storeName) {
+      l.a.storeName = clean; fixedNames++;
+      if (!l.sent && !l.edited) { l.variant = undefined; composeLead(l, true); }
+    }
+  });
+  if (fixedClosed || fixedNames) { save(); logLine(`Cleaned up ${fixedClosed} closed stores and ${fixedNames} store names`, 'info'); }
   // anything mid-analysis when the tab closed goes back in the queue
   leads.forEach((l) => { if (l.status === 'analyzing') l.status = 'queued'; });
   refreshStats(); renderList();
