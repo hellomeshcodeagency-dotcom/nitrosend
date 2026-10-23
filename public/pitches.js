@@ -92,6 +92,20 @@
     return out.replace(/[ \t]{2,}/g, ' ').replace(/ \./g, '.').replace(/ \?/g, '?').replace(/ ,/g, ',');
   }
 
+  /* ---------------- Store name safety net ---------------- */
+  const CLOSED_NAME = /this store is unavailable|store unavailable|shop is (currently )?unavailable|store (is )?closed|temporarily closed|opening soon|coming soon|password/i;
+  const JUNK_NAME = /unavailable|^home( page)?$|^homepage$|^welcome\b|online store|^shop$|^store$|^my store$|^the store$|coming soon|opening soon|password|^index$|\b404\b|not found|^untitled|^shopify\b|^official (site|website|store)$|^collections?$|^products?$|^all products$|^catalog$|^frontpage$/i;
+  function prettyDomain(host) {
+    const label = String(host || '').toLowerCase().replace(/^www\./, '').replace(/\.myshopify\.com$/, '').split('.')[0] || String(host || '');
+    return label.split(/[-_]+/).filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  }
+  function cleanStoreName(name, domain) {
+    const s = String(name || '').replace(/\s+/g, ' ').trim();
+    if (!s || s.length < 2 || s.length > 50 || JUNK_NAME.test(s) || !/[a-z]/i.test(s)) return prettyDomain(domain);
+    return s;
+  }
+  const looksClosed = (name) => CLOSED_NAME.test(String(name || ''));
+
   function firstName(email) {
     if (!email) return null;
     const local = email.split('@')[0].toLowerCase();
@@ -300,7 +314,7 @@
 
   function buildCtx(a, email, settings) {
     const bs = a.bestseller || {};
-    const store = a.storeName || a.domain;
+    const store = cleanStoreName(a.storeName, a.domain);
     const sKey = settings.season || 'none';
     const season = sKey !== 'none' && SEASONS[sKey] ? SEASONS[sKey] : null;
     return {
@@ -416,6 +430,8 @@
   global.Pitches = {
     compose,
     composeFollowup,
+    cleanStoreName,
+    looksClosed,
     pickIssue,
     cleanSpam,
     SERVICE_OF,
